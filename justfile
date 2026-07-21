@@ -61,6 +61,9 @@ speak-test text="This is the operator.":
 crossbar-test:
     uv run operator-os crossbar-test
 
+operator-test text="What is the weather?":
+    uv run operator-os operator-test --text "{{text}}"
+
 refresh *args:
     uv run operator-os refresh {{args}}
 

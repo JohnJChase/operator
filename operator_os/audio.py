@@ -28,13 +28,6 @@ VOICE_MODELS: dict[str, Path] = {
     "en_US-hfc_female-medium": VOICES_DIR / "hfc_female" / "en_US-hfc_female-medium.onnx",
 }
 
-# Named voices: onnx + matching .onnx.json beside it.
-VOICE_MODELS: dict[str, Path] = {
-    "hfc": VOICES_DIR / "hfc_female" / "en_US-hfc_female-medium.onnx",
-    "hfc_female": VOICES_DIR / "hfc_female" / "en_US-hfc_female-medium.onnx",
-    "en_US-hfc_female-medium": VOICES_DIR / "hfc_female" / "en_US-hfc_female-medium.onnx",
-}
-
 _TONE_CHUNK_MS = 20
 _TONE_AMP = 0.15
 # Crossbar seize timing (see docs/crossbar-outside-line-effect.md).
@@ -355,12 +348,14 @@ class AudioRouter:
                 raw.unlink(missing_ok=True)
 
     def record(self, seconds: float, output_path: Path | str) -> Path:
+        """Record from the handset mic. Interruptible via stop()/hangup."""
         if self._on_hook:
             raise RuntimeError("mic capture is disabled while on-hook")
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
             self._stop_locked()
+            gen = self._stop_gen
             cmd = [
                 "arecord",
                 "-q",
@@ -376,7 +371,27 @@ class AudioRouter:
                 str(max(1, int(seconds))),
                 str(out),
             ]
-            subprocess.run(cmd, check=True)
+            self._proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            proc = self._proc
+        try:
+            while proc.poll() is None:
+                if self._stopped_since(gen):
+                    proc.kill()
+                    break
+                time.sleep(0.05)
+            rc = proc.wait(timeout=1.0)
+            if self._stopped_since(gen):
+                raise RuntimeError("recording interrupted")
+            if rc != 0:
+                raise RuntimeError(f"arecord failed rc={rc}")
+        finally:
+            with self._lock:
+                if self._proc is proc:
+                    self._proc = None
         return out
 
     def _stop_locked(self) -> None:

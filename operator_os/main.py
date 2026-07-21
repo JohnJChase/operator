@@ -52,12 +52,17 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("speak-test", help="speak a phrase (reports Piper vs espeak)")
     sp.add_argument("--text", default="This is the operator.")
     sub.add_parser("crossbar-test", help="play outside-line seize click + dial tone")
+    ot = sub.add_parser("operator-test", help="one AI operator text turn (no mic)")
+    ot.add_argument("--text", default="What is the weather?")
     sub.add_parser("status", help="print profile and current state summary")
     ref = sub.add_parser("refresh", help="fetch and cache news/weather")
     ref.add_argument("--weather", action="store_true", help="refresh weather only")
     ref.add_argument("--news", action="store_true", help="refresh news only")
 
     args = parser.parse_args(argv)
+    from operator_os.refresh import load_dotenv
+
+    load_dotenv()
     profile = load_profile(args.config)
     events = EventLog()
 
@@ -81,6 +86,29 @@ def main(argv: list[str] | None = None) -> None:
         from operator_os.diagnostics import crossbar_test
 
         raise SystemExit(crossbar_test(profile))
+    if args.cmd == "operator-test":
+        from operator_os.ai_operator import (
+            LocalTools,
+            OperatorSession,
+            UNAVAILABLE,
+            build_status_snapshot,
+        )
+        from operator_os.openai_client import api_key_from_env
+
+        key = api_key_from_env()
+        if not key:
+            print(UNAVAILABLE, file=sys.stderr)
+            raise SystemExit(1)
+        audio = AudioRouter(profile.audio)
+        audio.set_hook(True)
+        tools = LocalTools(audio=audio, status_snapshot=build_status_snapshot(profile.name))
+        session = OperatorSession(audio=audio, events=events, tools=tools, api_key=key)
+        try:
+            reply = session.run_text_turn(args.text)
+            print(f"operator: {reply}")
+            raise SystemExit(0 if reply else 1)
+        finally:
+            audio.close()
     if args.cmd == "refresh":
         from operator_os.refresh import refresh_all
 
@@ -132,24 +160,30 @@ def run_loop(
     q: queue.SimpleQueue[tuple] = queue.SimpleQueue()
     # True while PLAYING_SERVICE audio was started non-blocking; hangup clears it.
     await_service_done = False
+    op_session = None  # OperatorSession | None
 
     def _status(msg: str) -> None:
         print(msg, flush=True)
 
     def apply(tr) -> None:
-        nonlocal await_service_done
+        nonlocal await_service_done, op_session
         for action in tr.actions:
             _do_action(action, phone, audio, events, ctl, live_audio)
         if tr.reason:
             _status(f"state={ctl.state.value}  ({tr.reason})")
         if ctl.state == State.ON_HOOK_IDLE:
             await_service_done = False
+            if op_session is not None:
+                op_session.cancel_now()
+                op_session = None
 
     def on_hook_isr(off_hook: bool) -> None:
-        nonlocal await_service_done
+        nonlocal await_service_done, op_session
         # Interrupt path: silence first, then ask main loop for state change.
         if not off_hook:
             await_service_done = False  # don't treat kill as "service finished"
+            if op_session is not None:
+                op_session.cancel_now()
             audio.notify_hangup()
         q.put(("hook", off_hook))
 
@@ -179,6 +213,9 @@ def run_loop(
                     audio.set_hook(False)
                     decoder.reset()
                     await_service_done = False
+                    if op_session is not None:
+                        op_session.cancel_now()
+                        op_session = None
             # If we went on-hook, drop pending pulses from this tick.
             if ctl.state == State.ON_HOOK_IDLE:
                 pulses = []
@@ -192,18 +229,20 @@ def run_loop(
                     continue
                 _status(f"pulse #{pending}")
 
-            # Playback ended while still off-hook → return to dial tone.
+            # Playback / operator session ended while still off-hook → dial tone.
             # Hangup kills aplay too; never treat that as service_done (dial-tone blip).
-            if (
-                ctl.state == State.PLAYING_SERVICE
-                and await_service_done
-                and not audio.is_busy()
-                and phone.is_off_hook()
-            ):
-                await_service_done = False
-                decoder.reset()
-                _flush_queue_pulses(q)
-                apply(ctl.handle(Event("service_done")))
+            if ctl.state == State.PLAYING_SERVICE and await_service_done and phone.is_off_hook():
+                op_alive = op_session is not None and op_session.is_alive()
+                if op_alive:
+                    time.sleep(0.02)
+                    continue
+                if op_session is not None:
+                    op_session = None
+                if not audio.is_busy():
+                    await_service_done = False
+                    decoder.reset()
+                    _flush_queue_pulses(q)
+                    apply(ctl.handle(Event("service_done")))
 
             now_ms = time.monotonic() * 1000
             if ctl.state not in (State.DIAL_TONE, State.COLLECTING_DIGIT):
@@ -224,7 +263,9 @@ def run_loop(
                 apply(tr)
                 decoder.reset()
                 result = handle_digit(digit)
-                await_service_done = _play_service(result, audio, events, live_audio)
+                await_service_done, op_session = _play_service(
+                    result, audio, events, live_audio, profile_name=profile.name
+                )
                 decoder.reset()
                 _flush_queue_pulses(q)
             time.sleep(0.02)
@@ -288,8 +329,15 @@ def _do_action(action, phone, audio, events, ctl, live_audio) -> None:
             phone.decoder.reset()
 
 
-def _play_service(result: ServiceResult, audio: AudioRouter, events: EventLog, live: bool) -> bool:
-    """Start service audio. Returns True if main loop should await idle then service_done.
+def _play_service(
+    result: ServiceResult,
+    audio: AudioRouter,
+    events: EventLog,
+    live: bool,
+    *,
+    profile_name: str = "",
+) -> tuple[bool, object | None]:
+    """Start service audio. Returns (await_done, operator_session_or_None).
 
     Live playback must not block — hangup is processed on the main loop and must
     preempt news/weather/announcements immediately.
@@ -297,21 +345,29 @@ def _play_service(result: ServiceResult, audio: AudioRouter, events: EventLog, l
     events.emit("service", digit=result.digit, kind=result.kind)
     print(f"service digit={result.digit} kind={result.kind}: {result.text or result.path}", flush=True)
     if not live:
-        return False
+        return False, None
+    if result.kind == "operator":
+        from operator_os.ai_operator import UNAVAILABLE, start_operator
+
+        session = start_operator(audio, events, profile_name=profile_name)
+        if session is None:
+            audio.speak(UNAVAILABLE, wait=False)
+            return True, None
+        return True, session
     if result.kind == "outside_seize":
         # Short click+tone start; external dial tone runs until hangup.
         audio.seize_outside_line()
-        return False
+        return False, None
     audio.stop()
     if result.kind == "play_file" and result.path:
         audio.play_file(result.path, wait=False)
-        return True
+        return True, None
     if result.kind == "effect_then_speak":
         audio.play_tone("crossbar", seconds=0.4, wait=True)
         audio.speak(result.text, wait=False)
-        return True
+        return True, None
     audio.speak(result.text, wait=False)
-    return True
+    return True, None
 
 
 def _run_script(phone: SimulatorPhone, audio: AudioRouter, events: EventLog, script: str) -> int:

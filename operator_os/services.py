@@ -10,7 +10,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class ServiceResult:
     digit: int
-    kind: str  # speak | play_file | effect_then_speak | outside_seize
+    kind: str  # speak | play_file | effect_then_speak | outside_seize | operator
     text: str
     path: Path | None = None
 
@@ -25,11 +25,8 @@ def handle_digit(digit: int) -> ServiceResult:
     if digit == 0:
         return ServiceResult(
             digit=0,
-            kind="speak",
-            text=(
-                "Operator. Local services: dial 1 for news, 2 for weather. "
-                "Outside line seizes a trunk tone; cloud operator is not yet available."
-            ),
+            kind="operator",
+            text="",
         )
     if digit == 1:
         audio = _first_existing(NEWS_AUDIO_CANDIDATES)

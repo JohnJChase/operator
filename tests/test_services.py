@@ -3,10 +3,9 @@
 from operator_os.services import handle_digit
 
 
-def test_digit_zero_help():
+def test_digit_zero_operator():
     r = handle_digit(0)
-    assert r.kind == "speak"
-    assert "Operator" in r.text
+    assert r.kind == "operator"
 
 
 def test_digit_one_news_or_fallback():
