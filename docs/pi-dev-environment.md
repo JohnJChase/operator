@@ -68,3 +68,9 @@ just mic-test           # just mic-test 5
 just speak-test         # just speak-test "Operator."
 just crossbar-test
 ```
+
+## Appliance (systemd)
+
+See `docs/systemd.md`. Unit file: `deploy/operator-os.service`.
+Ring GPIO opens fail-off (`initial_value=False`); `run` also calls `ring_stop()`
+before the loop. Event log `data/events.jsonl` is soft-capped (~256KB).

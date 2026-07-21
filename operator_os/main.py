@@ -10,6 +10,7 @@ from operator_os.config import HardwareProfile, load_profile
 from operator_os.diagnostics import (
     audio_test,
     mic_test,
+    print_status,
     ring_test,
     selftest,
     trace_dial,
@@ -88,13 +89,7 @@ def main(argv: list[str] | None = None) -> None:
             refresh_all(profile, weather=both or args.weather, news=both or args.news)
         )
     if args.cmd == "status":
-        print(f"profile={profile.name}")
-        print(f"hook={profile.gpio.hook_bcm} dial={profile.gpio.dial_pulse_bcm} "
-              f"ring={profile.gpio.ring_bcm}")
-        print(f"audio={profile.audio.alsa_device}")
-        audio = AudioRouter(profile.audio)
-        print(f"tts={audio.engine} voice={profile.audio.piper_voice} model={audio.model_path}")
-        raise SystemExit(0)
+        raise SystemExit(print_status(profile))
     if args.cmd == "simulate":
         phone = SimulatorPhone(profile)
         audio = AudioRouter(profile.audio)
@@ -103,6 +98,7 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_simulate_repl(phone, audio, events))
     if args.cmd == "run":
         phone = GpioPhone(profile)
+        phone.ring_stop()  # fail-off before entering the loop
         audio = AudioRouter(profile.audio)
         try:
             raise SystemExit(run_loop(phone, audio, events, profile, live_audio=True))

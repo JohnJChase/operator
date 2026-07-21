@@ -34,3 +34,5 @@ Rev A pins: hook GPIO17, dial GPIO10, ring GPIO23. Audio: ATR2x `plughw:2,0`.
 This is a hobby appliance: one process, file caches, JSONL events, CLI
 diagnostics. See `docs/pi-dev-environment.md` and
 `docs/hardware-profile-verified.md`.
+
+Leave-it-plugged-in: `docs/systemd.md` + `deploy/operator-os.service`.

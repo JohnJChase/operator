@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from operator_os.audio import AudioRouter
-from operator_os.config import HardwareProfile, load_profile
+from operator_os.config import HardwareProfile
 from operator_os.phone import GpioPhone
 
 
@@ -156,24 +156,86 @@ def selftest(profile: HardwareProfile, hardware: bool = False) -> int:
     if not hardware:
         return 0
 
-    phone = GpioPhone(profile)
+    rc = 0
+    phone: GpioPhone | None = None
     try:
-        print(f"hook now: {'OFF_HOOK' if phone.is_off_hook() else 'ON_HOOK'}")
+        phone = GpioPhone(profile)
+        # Fail-off: ring must be low at open.
         phone.ring_stop()
-        print("ring GPIO forced off at selftest")
+        hook = "OFF_HOOK" if phone.is_off_hook() else "ON_HOOK"
+        print(f"hook: {hook}")
+        print(f"dial: GPIO{profile.gpio.dial_pulse_bcm} ready (pulse-only)")
+        print(f"ring: GPIO{profile.gpio.ring_bcm} forced OFF (fail-safe)")
+    except Exception as e:
+        print(f"hook/dial/ring: FAIL ({e})", file=sys.stderr)
+        rc = 1
     finally:
-        phone.close()
+        if phone is not None:
+            phone.close()
+
+    try:
+        audio = AudioRouter(profile.audio)
+        print(f"tts: {audio.engine} model={audio.model_path}")
+        audio.set_hook(off_hook=True)
+        audio.play_tone(440, seconds=0.3, wait=True)
+        print("audio playback: ok (440 Hz)")
+        # Short mic capture + level check (no secret paths printed beyond data/).
+        out = Path("data/recordings/selftest-mic.wav")
+        audio.record(1.0, out)
+        from operator_os.audio import analyze_wav_levels
+
+        levels = analyze_wav_levels(out)
+        print(
+            f"mic: peak={levels.peak_dbfs:.1f} dBFS rms={levels.rms_dbfs:.1f} dBFS "
+            f"verdict={levels.verdict}"
+        )
+        if levels.verdict == "BAD":
+            rc = 1
+        audio.close()
+    except Exception as e:
+        print(f"audio/mic: FAIL ({e})", file=sys.stderr)
+        rc = 1
+
+    print("hardware selftest: ok" if rc == 0 else "hardware selftest: FAILED")
+    return rc
+
+
+def print_status(profile: HardwareProfile) -> int:
+    """CLI status: profile, caches, GPIO snapshot — no secrets."""
+    print(f"profile={profile.name}")
+    print(
+        f"gpio hook={profile.gpio.hook_bcm} dial={profile.gpio.dial_pulse_bcm} "
+        f"ring={profile.gpio.ring_bcm}"
+    )
+    print(f"audio device={profile.audio.alsa_device} rate={profile.audio.sample_rate_hz}")
 
     audio = AudioRouter(profile.audio)
-    audio.set_hook(off_hook=True)
-    audio.play_tone(440, seconds=0.5, wait=True)
-    print("440 Hz tone played")
-    return 0
+    print(f"tts engine={audio.engine} voice={profile.audio.piper_voice}")
+    print(f"tts model={audio.model_path}")
+    audio.close()
 
+    for label, path in (
+        ("weather.json", Path("data/weather.json")),
+        ("weather.wav", Path("data/weather.wav")),
+        ("news.json", Path("data/news.json")),
+        ("news.wav", Path("data/news.wav")),
+        ("events.jsonl", Path("data/events.jsonl")),
+    ):
+        if path.is_file():
+            print(f"cache {label}: {path.stat().st_size} bytes")
+        else:
+            print(f"cache {label}: missing")
 
-def load_or_exit(path: str | None) -> HardwareProfile:
     try:
-        return load_profile(path)
-    except FileNotFoundError:
-        print(f"hardware profile not found: {path or 'config/hardware_profile.yaml'}", file=sys.stderr)
-        raise SystemExit(2) from None
+        phone = GpioPhone(profile)
+        try:
+            phone.ring_stop()
+            print(f"hook_now={'OFF_HOOK' if phone.is_off_hook() else 'ON_HOOK'}")
+            print("ring_now=OFF")
+        finally:
+            phone.close()
+    except Exception as e:
+        print(f"gpio_snapshot: unavailable ({e})")
+
+    print("secrets: not shown")
+    return 0
