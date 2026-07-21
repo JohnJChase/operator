@@ -83,3 +83,32 @@ def test_outside_cancel_returns_dial_tone():
     tr = ctl.handle(Event("outside_cancel"))
     assert ctl.state == State.DIAL_TONE
     assert "fx_release" in tr.actions
+
+
+def test_outside_first_pulse_stops_dial_tone():
+    ctl = PhoneController()
+    ctl.handle(Event("off_hook"))
+    ctl.handle(Event("digit", value=9))
+    tr = ctl.handle(Event("pulse"))
+    assert ctl.state == State.OUTSIDE_LINE
+    assert "audio_stop" in tr.actions
+
+
+def test_inbound_ring_answer_to_sip_call():
+    ctl = PhoneController()
+    tr = ctl.handle(Event("ring_start"))
+    assert ctl.state == State.INCOMING_RINGING
+    assert "ring_start" in tr.actions
+    tr = ctl.handle(Event("off_hook"))
+    assert ctl.state == State.SIP_CALL
+    assert "sip_answer" in tr.actions
+    assert "ring_stop" in tr.actions
+
+
+def test_inbound_cancel_returns_idle():
+    ctl = PhoneController()
+    ctl.handle(Event("ring_start"))
+    tr = ctl.handle(Event("incoming_cancel"))
+    assert ctl.state == State.ON_HOOK_IDLE
+    assert "ring_stop" in tr.actions
+    assert "sip_hangup" in tr.actions

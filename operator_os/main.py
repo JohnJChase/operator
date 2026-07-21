@@ -165,7 +165,13 @@ def run_loop(
     import queue
 
     from operator_os.refresh import load_dotenv
-    from operator_os.sip import SipCallSession, SipCredentials, normalize_nanp, sip_configured
+    from operator_os.sip import (
+        SipCallSession,
+        SipCredentials,
+        SipInboundListener,
+        normalize_nanp,
+        sip_configured,
+    )
 
     load_dotenv()
     ctl = PhoneController()
@@ -175,32 +181,77 @@ def run_loop(
     # True while PLAYING_SERVICE audio was started non-blocking; hangup clears it.
     await_service_done = False
     op_session = None  # RealtimeSession | None
-    sip_session: SipCallSession | None = None
+    sip_session: SipCallSession | SipInboundListener | None = None
+    inbound: SipInboundListener | None = None
     sip_dest: str | None = None
     outside_digits = ""
     outside_last_at: float | None = None
+    ring_started_at: float | None = None
     interdigit_s = float(profile.raw.get("timing", {}).get("outside_number_interdigit_timeout_ms", 2000)) / 1000.0
+    inbound_ring_s = float(profile.raw.get("timing", {}).get("inbound_ring_timeout_ms", 45000)) / 1000.0
     alsa_device = profile.audio.alsa_device
 
     def _status(msg: str) -> None:
         print(msg, flush=True)
 
     def _hangup_sip() -> None:
-        nonlocal sip_session, sip_dest
+        nonlocal sip_session, sip_dest, inbound, ring_started_at
         if sip_session is not None:
             sip_session.hangup()
             sip_session = None
+        if inbound is not None:
+            inbound.hangup()
+            inbound = None
         sip_dest = None
+        ring_started_at = None
+
+    def _stop_inbound() -> None:
+        nonlocal inbound
+        if inbound is not None:
+            inbound.hangup()
+            inbound = None
+
+    def _ensure_inbound() -> None:
+        nonlocal inbound
+        if not live_audio or not sip_configured():
+            return
+        if inbound is not None and inbound.is_alive():
+            return
+        inbound = None
+        creds = SipCredentials.from_env()
+        if creds is None:
+            return
+        try:
+            listener = SipInboundListener(credentials=creds, alsa_device=alsa_device)
+            listener.start()
+            inbound = listener
+            _status("sip: inbound registered (waiting for calls)")
+        except Exception as e:
+            _status(f"sip: inbound register failed {e}")
+            events.emit("sip", value="inbound_error", detail=str(e)[:120])
 
     def apply(tr) -> None:
-        nonlocal await_service_done, op_session, sip_session, sip_dest
-        nonlocal outside_digits, outside_last_at
+        nonlocal await_service_done, op_session, sip_session, sip_dest, inbound
+        nonlocal outside_digits, outside_last_at, ring_started_at
         for action in tr.actions:
             if action == "sip_hangup":
                 _hangup_sip()
                 events.emit("sip", value="hangup")
                 continue
+            if action == "sip_answer":
+                if inbound is not None:
+                    try:
+                        inbound.answer()
+                        sip_session = inbound
+                        inbound = None
+                        events.emit("sip", value="answer")
+                        _status("sip: answered inbound")
+                    except Exception as e:
+                        _status(f"sip: answer failed {e}")
+                        _hangup_sip()
+                continue
             if action == "sip_dial":
+                _stop_inbound()
                 _start_sip_call()
                 continue
             _do_action(action, phone, audio, events, ctl, live_audio)
@@ -210,10 +261,24 @@ def run_loop(
             await_service_done = False
             outside_digits = ""
             outside_last_at = None
+            ring_started_at = None
             if op_session is not None:
                 op_session.cancel_now()
                 op_session = None
-            _hangup_sip()
+            # Drop any live call, then re-register for inbound.
+            if sip_session is not None:
+                sip_session.hangup()
+                sip_session = None
+            sip_dest = None
+            _ensure_inbound()
+        elif ctl.state in (
+            State.DIAL_TONE,
+            State.COLLECTING_DIGIT,
+            State.PLAYING_SERVICE,
+            State.OUTSIDE_LINE,
+        ):
+            # Off-hook for local use: don't accept new inbound (frees SIP port too).
+            _stop_inbound()
         if ctl.state == State.OUTSIDE_LINE and tr.reason == "digit_9":
             outside_digits = ""
             outside_last_at = None
@@ -229,11 +294,12 @@ def run_loop(
             return
         audio.stop()
         try:
+            _status(f"sip: dialing {dest}")
             sess = SipCallSession(e164=dest, credentials=creds, alsa_device=alsa_device)
             sess.start()
             sip_session = sess
             events.emit("sip", value="dial", detail=dest)
-            _status(f"sip: dialing {dest}")
+            _status(f"sip: call up {dest} (hang up to cancel)")
         except Exception as e:
             _status(f"sip: dial failed {e}")
             events.emit("sip", value="error", detail=str(e)[:120])
@@ -258,7 +324,9 @@ def run_loop(
 
     _status(f"state={ctl.state.value}  (lift handset; Ctrl+C to quit)")
     if live_audio and not sip_configured():
-        _status("sip: TELNYX_SIP_USER/PASSWORD not set — digit 9 collect only")
+        _status("sip: TELNYX_* not set — digit 9 / inbound disabled")
+    elif live_audio:
+        _ensure_inbound()
     try:
         while True:
             if stop_at and time.monotonic() >= stop_at:
@@ -280,10 +348,11 @@ def run_loop(
                     await_service_done = False
                     outside_digits = ""
                     outside_last_at = None
+                    ring_started_at = None
                     if op_session is not None:
                         op_session.cancel_now()
                         op_session = None
-                    _hangup_sip()
+                    # on_hook apply already restarts inbound via ON_HOOK_IDLE.
             # If we went on-hook, drop pending pulses from this tick.
             if ctl.state == State.ON_HOOK_IDLE:
                 pulses = []
@@ -294,10 +363,43 @@ def run_loop(
                     apply(ctl.handle(Event("pulse")))
                 elif ctl.state == State.OUTSIDE_LINE:
                     apply(ctl.handle(Event("pulse")))
+                    # Keep interdigit timer from firing mid-digit (rotary is slow).
+                    outside_last_at = time.monotonic()
                 elif ctl.state != State.COLLECTING_DIGIT:
                     decoder.reset()
                     continue
                 _status(f"pulse #{pending}")
+
+            # Inbound INVITE while on-hook → mechanical ring.
+            if ctl.state == State.ON_HOOK_IDLE and live_audio:
+                if inbound is not None and inbound.is_alive():
+                    ev = inbound.poll()
+                    if ev == "incoming":
+                        ring_started_at = time.monotonic()
+                        apply(ctl.handle(Event("ring_start")))
+                        time.sleep(0.02)
+                        continue
+                else:
+                    _ensure_inbound()
+
+            if ctl.state == State.INCOMING_RINGING:
+                if inbound is not None:
+                    ev = inbound.poll()
+                    if ev == "ended":
+                        _status("sip: caller hung up")
+                        apply(ctl.handle(Event("incoming_cancel")))
+                        time.sleep(0.02)
+                        continue
+                if (
+                    ring_started_at is not None
+                    and (time.monotonic() - ring_started_at) >= inbound_ring_s
+                ):
+                    _status("sip: inbound ring timeout")
+                    apply(ctl.handle(Event("incoming_cancel")))
+                    time.sleep(0.02)
+                    continue
+                time.sleep(0.02)
+                continue
 
             # Playback / operator session ended while still off-hook → dial tone.
             # Hangup kills aplay too; never treat that as service_done (dial-tone blip).
@@ -316,7 +418,14 @@ def run_loop(
 
             # SIP call ended remotely → release trunk.
             if ctl.state == State.SIP_CALL and phone.is_off_hook():
+                remote_done = False
                 if sip_session is None or not sip_session.is_alive():
+                    remote_done = True
+                elif isinstance(sip_session, SipInboundListener):
+                    remote_done = sip_session.poll() == "ended"
+                elif isinstance(sip_session, SipCallSession):
+                    remote_done = sip_session.remote_ended()
+                if remote_done:
                     _flush_queue_pulses(q)
                     apply(ctl.handle(Event("sip_done")))
                     time.sleep(0.02)
@@ -324,9 +433,11 @@ def run_loop(
 
             # Outside line: wait interdigit silence, then place or cancel.
             if ctl.state == State.OUTSIDE_LINE and phone.is_off_hook():
+                pending = decoder.pending_pulses
                 if (
                     outside_digits
                     and outside_last_at is not None
+                    and pending == 0
                     and (time.monotonic() - outside_last_at) >= interdigit_s
                 ):
                     e164 = normalize_nanp(outside_digits)
@@ -401,6 +512,7 @@ def run_loop(
     except KeyboardInterrupt:
         _status("quit")
         apply(ctl.handle(Event("hangup")))
+        _hangup_sip()
         return 0
 
 
@@ -448,8 +560,14 @@ def _do_action(action, phone, audio, events, ctl, live_audio) -> None:
             audio.stop()
     elif action == "ring_stop":
         phone.ring_stop()
+        events.emit("ring", value="stop")
     elif action == "ring_start":
-        phone.ring_start()
+        if phone.is_off_hook():
+            print("ring: skip (off-hook)", flush=True)
+        else:
+            phone.ring_start()
+            print("ring: start", flush=True)
+            events.emit("ring", value="start")
     elif action.startswith("fx_") or action == "crossbar":
         # Line-plant signatures declared on the transition chart.
         if live_audio and phone.is_off_hook():

@@ -10,7 +10,7 @@ Profile: `config/hardware_profile.yaml` (`rev_a_direct_bypass_gpio10`)
 |---|---|---|
 | Hook | 17 | Manual: many clean ON/OFF transitions via `trace-hook` |
 | Dial pulse | 10 | Manual: digits `1-9` and `0` (10 pulses) via `trace-dial` |
-| Ring | 23 | `ring-test --seconds 1.5` energized and exited clean |
+| Ring | 22 | `ring-test --seconds 1.5` energized and exited clean |
 
 ## Audio
 

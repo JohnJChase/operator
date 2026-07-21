@@ -181,7 +181,7 @@ class SimulatorPhone(PhoneIO):
 
 @dataclass
 class GpioPhone(PhoneIO):
-    """Rev A GPIO: hook BCM17, dial BCM10 when_pressed, ring BCM23."""
+    """Rev A GPIO: hook BCM17, dial BCM10 when_pressed, ring BCM22."""
 
     profile: HardwareProfile
     decoder: DialDecoder = field(init=False)
@@ -262,8 +262,9 @@ class GpioPhone(PhoneIO):
             self._pulse_cb()
 
     def _on_hook_pressed(self) -> None:
-        # Off-hook: software ring cutoff immediately.
-        self.ring_stop()
+        # Do not ring_stop here: ring HV can glitch the hook line and abort the
+        # first cadence. Cutoff is debounced in _ring_loop; answer/hangup FSM
+        # also issues ring_stop.
         if self._hook_cb:
             self._hook_cb(True)
 
@@ -275,21 +276,45 @@ class GpioPhone(PhoneIO):
         on_ms = self.profile.ring.cadence_on_ms
         off_ms = self.profile.ring.cadence_off_ms
         poll = self.profile.ring.poll_hook_while_ringing_ms / 1000.0
+        # Sustained off-hook before cutoff (hook GPIO is noisy while ringing).
+        off_hook_need_s = max(0.1, self.profile.ring.poll_hook_while_ringing_ms * 2 / 1000.0)
+        off_hook_since: float | None = None
         while not self._ring_stop.is_set():
             if self.is_off_hook():
-                self.ring_stop()
-                return
+                if off_hook_since is None:
+                    off_hook_since = time.monotonic()
+                elif time.monotonic() - off_hook_since >= off_hook_need_s:
+                    self.ring_stop()
+                    return
+            else:
+                off_hook_since = None
             self._ring.on()  # type: ignore[union-attr]
             deadline = time.monotonic() + on_ms / 1000.0
             while time.monotonic() < deadline:
-                if self._ring_stop.is_set() or self.is_off_hook():
+                if self._ring_stop.is_set():
                     self.ring_stop()
                     return
+                if self.is_off_hook():
+                    if off_hook_since is None:
+                        off_hook_since = time.monotonic()
+                    elif time.monotonic() - off_hook_since >= off_hook_need_s:
+                        self.ring_stop()
+                        return
+                else:
+                    off_hook_since = None
                 time.sleep(poll)
             self._ring.off()  # type: ignore[union-attr]
             deadline = time.monotonic() + off_ms / 1000.0
             while time.monotonic() < deadline:
-                if self._ring_stop.is_set() or self.is_off_hook():
+                if self._ring_stop.is_set():
                     self.ring_stop()
                     return
+                if self.is_off_hook():
+                    if off_hook_since is None:
+                        off_hook_since = time.monotonic()
+                    elif time.monotonic() - off_hook_since >= off_hook_need_s:
+                        self.ring_stop()
+                        return
+                else:
+                    off_hook_since = None
                 time.sleep(poll)

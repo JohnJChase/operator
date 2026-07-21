@@ -58,7 +58,7 @@ gpio:
     off_normal_available: false
     calibration_ui_desired: true
   ring:
-    bcm: 23
+    bcm: 22
     direction: output
     active: high
     initial: low
@@ -139,7 +139,8 @@ timing:
   hook_flash_min_ms: 100
   hook_flash_max_ms: 700
   definite_hangup_min_ms: 1000
-  outside_number_interdigit_timeout_ms: 2000
+  outside_number_interdigit_timeout_ms: 3500
+  inbound_ring_timeout_ms: 45000
 safety:
   ring_gpio_fails_off: true
   ring_while_off_hook_allowed: false

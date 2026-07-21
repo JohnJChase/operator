@@ -67,7 +67,7 @@ gpio:
     calibration_ui_desired: true
 
   ring:
-    bcm: 23
+    bcm: 22
     direction: output
     active: high
     initial: low

@@ -80,12 +80,16 @@ def _transition(state: State, event: Event) -> Transition:
     if state == State.INCOMING_RINGING:
         if et == "off_hook":
             return Transition(
-                State.DIAL_TONE,
-                actions=("ring_stop", "dial_tone"),
+                State.SIP_CALL,
+                actions=("ring_stop", "sip_answer"),
                 reason="answered",
             )
-        if et == "ring_stop":
-            return Transition(State.ON_HOOK_IDLE, actions=("ring_stop",), reason="ring_stop")
+        if et in ("ring_stop", "incoming_cancel"):
+            return Transition(
+                State.ON_HOOK_IDLE,
+                actions=("ring_stop", "sip_hangup"),
+                reason="incoming_cancel" if et == "incoming_cancel" else "ring_stop",
+            )
         return Transition(state)
 
     if state == State.DIAL_TONE:
@@ -140,7 +144,8 @@ def _transition(state: State, event: Event) -> Transition:
                 reason="outside_cancel",
             )
         if et == "pulse":
-            return Transition(state, reason="outside_pulse")
+            # Classic CO: dial tone cuts on first dial pulse, not after the digit.
+            return Transition(state, actions=("audio_stop",), reason="outside_pulse")
         if et == "digit":
             return Transition(state, reason="outside_digit")
         return Transition(state)
