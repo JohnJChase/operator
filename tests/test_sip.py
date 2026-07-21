@@ -1,6 +1,22 @@
 """SIP helpers and outside-line number normalization."""
 
-from operator_os.sip import SipCredentials, _telnyx_reject_message, normalize_nanp
+from operator_os.sip import (
+    SipCredentials,
+    _pjsua_media_args,
+    _telnyx_reject_message,
+    normalize_nanp,
+)
+
+
+def test_media_args_use_default_sound_devices():
+    """Hard-coded PortAudio 0 kills idle inbound on Pi (HDMI / no capture)."""
+    args = _pjsua_media_args(null_audio=False)
+    assert not any(a.startswith("--capture-dev=") for a in args)
+    assert not any(a.startswith("--playback-dev=") for a in args)
+    assert "--snd-auto-close=0" in args
+    null = _pjsua_media_args(null_audio=True)
+    assert "--null-audio" in null
+    assert not any(a.startswith("--capture-dev=") for a in null)
 
 
 def test_normalize_ten_digit_nanp():

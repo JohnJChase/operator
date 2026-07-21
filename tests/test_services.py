@@ -25,6 +25,20 @@ def test_digit_three_wamu_stream():
     assert "WAMU" in r.text
 
 
+def test_digit_four_nws_stream():
+    from operator_os.services import NWS_KHB36, handle_digit
+
+    r = handle_digit(4)
+    assert r.kind == "stream"
+    assert r.url == NWS_KHB36
+    assert "weather" in r.text.lower()
+
+
+def test_digit_zero_menu_mentions_weather_radio():
+    r = handle_digit(0)
+    assert "4 for weather radio" in r.text
+
+
 def test_digit_eight_realtime():
     r = handle_digit(8)
     assert r.kind == "realtime_operator"

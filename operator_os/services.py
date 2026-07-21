@@ -8,10 +8,12 @@ from pathlib import Path
 
 # WAMU 88.5 HD-1 — live NPR from American University Radio.
 WAMU_PLS = "https://static.wamu.org/streams/live/1/mp3.1.pls"
+# NOAA Weather Radio KHB36 (Washington / Baltimore area) via mikev.com relay.
+NWS_KHB36 = "https://stream.mikev.com/khb36.mp3"
 
 LOCAL_MENU = (
     "Operator. Dial 1 for news, 2 for weather, "
-    "3 for WAMU, "
+    "3 for WAMU, 4 for weather radio, "
     "8 for the information operator, 9 for outside line. "
     "Dial 0 to hear this again."
 )
@@ -65,6 +67,13 @@ def handle_digit(digit: int) -> ServiceResult:
             text="WAMU 88.5",
             url=WAMU_PLS,
         )
+    if digit == 4:
+        return ServiceResult(
+            digit=4,
+            kind="stream",
+            text="National Weather Service radio",
+            url=NWS_KHB36,
+        )
     if digit == 8:
         return ServiceResult(digit=8, kind="realtime_operator", text="")
     if digit == 9:
@@ -73,7 +82,7 @@ def handle_digit(digit: int) -> ServiceResult:
             kind="outside_seize",
             text="Outside line.",
         )
-    if 4 <= digit <= 7:
+    if 5 <= digit <= 7:
         return ServiceResult(
             digit=digit,
             kind="speak",

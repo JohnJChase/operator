@@ -34,6 +34,9 @@ That “clunk…CLACK” is what reads as a mechanical switch on the WE302 recei
 
 ## Status
 
-Implemented as programmatic PCM in `AudioRouter.seize_outside_line()` (no
-pre-rendered WAV). Actual SIP/outside number collection is a later phase; this
-is the theatrical seize into a second dial tone.
+Plant FX prefer short WAVs in `data/fx/` (`fx_seize*.wav`, `fx_release.wav`) cut
+from Freesound crossbar takes — see `data/fx/ATTRIBUTION.md`. Seize picks
+randomly from the bank on each throw. If a file is missing,
+`build_crossbar_click()` synthesizes a fallback. Outside-line seize
+still does click → blind spot → external dial tone in
+`AudioRouter.seize_outside_line()`.

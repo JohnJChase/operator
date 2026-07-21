@@ -22,6 +22,10 @@ logs/
 var/
 data/*
 !data/.gitkeep
+!data/fx/
+!data/fx/*.wav
+!data/fx/ATTRIBUTION.md
+data/fx/src/
 *.db
 *.sqlite
 *.sqlite3
@@ -52,3 +56,5 @@ PROJECT_OVERVIEW.md
 .idea/
 .vscode/
 *.swp
+
+# Full-length FX sources kept locally under data/fx/src/ (gitignored).

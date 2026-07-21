@@ -211,13 +211,18 @@ def run_loop(
             inbound.hangup()
             inbound = None
 
+    inbound_announced = False
+
     def _ensure_inbound() -> None:
-        nonlocal inbound
+        nonlocal inbound, inbound_announced
         if not live_audio or not sip_configured():
             return
         if inbound is not None and inbound.is_alive():
             return
-        inbound = None
+        # Dead listener: tear down so we don't leak PTY/temp dirs or port 5080.
+        if inbound is not None:
+            inbound.hangup()
+            inbound = None
         creds = SipCredentials.from_env()
         if creds is None:
             return
@@ -225,8 +230,12 @@ def run_loop(
             listener = SipInboundListener(credentials=creds, alsa_device=alsa_device)
             listener.start()
             inbound = listener
-            _status("sip: inbound registered (waiting for calls)")
+            # Only announce once (and again after a failed attempt).
+            if not inbound_announced:
+                _status("sip: inbound registered (waiting for calls)")
+                inbound_announced = True
         except Exception as e:
+            inbound_announced = False
             _status(f"sip: inbound register failed {e}")
             events.emit("sip", value="inbound_error", detail=str(e)[:120])
 

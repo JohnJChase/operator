@@ -67,6 +67,35 @@ def test_crossbar_click_is_short_and_hot():
     assert peak > int(_TONE_AMP * 32767 * 2.0)
 
 
+def test_fx_samples_load_short():
+    from pathlib import Path
+
+    from operator_os import audio as audio_mod
+    from operator_os.audio import FX_DIR, load_fx_pcm
+
+    seize_bank = sorted(FX_DIR.glob("fx_seize*.wav"))
+    assert len(seize_bank) >= 4
+    seize = load_fx_pcm("seize", 16000)
+    release = load_fx_pcm("release", 16000)
+    assert seize is not None and release is not None
+    # Leading pad + 2–3 clicks; keep under half a second.
+    assert 0.05 * 16000 * 2 <= len(seize) <= 0.50 * 16000 * 2
+    assert 0.05 * 16000 * 2 <= len(release) <= 0.50 * 16000 * 2
+    # Resample one fixed bank member (random would pick different lengths).
+    orig = audio_mod.random.choice
+    audio_mod.random.choice = lambda seq: seize_bank[0]
+    try:
+        s16 = load_fx_pcm("seize", 16000)
+        s8 = load_fx_pcm("seize", 8000)
+    finally:
+        audio_mod.random.choice = orig
+    assert s16 is not None and s8 is not None
+    assert abs(len(s8) - len(s16) // 2) <= 4
+    heard = {load_fx_pcm("seize", 16000) for _ in range(40)}
+    assert len(heard) >= 2
+    assert all(Path(p).is_file() for p in seize_bank)
+
+
 def test_drain_hooks_before_pulses():
     import queue
 

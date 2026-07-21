@@ -132,8 +132,25 @@ def _telnyx_reject_message(log_text: str) -> str | None:
 
 
 def _pjsua_media_args(*, null_audio: bool) -> list[str]:
-    """Shared media flags for handset acoustics (carbon mic + receiver)."""
-    args = [
+    """Shared media flags for handset acoustics (carbon mic + receiver).
+
+    Do not pass ``--capture-dev`` / ``--playback-dev``: PortAudio index 0 is
+    often HDMI (no capture) on the Pi, and pjsua then exits a few seconds after
+    REGISTER. Default devices (-1) honor the per-process ``~/.asoundrc`` that
+    points at the handset USB card. ``--snd-auto-close=0`` keeps the device open
+    while idle so inbound stays registered without a respawn loop.
+    """
+    if null_audio:
+        return [
+            "--null-audio",
+            "--clock-rate=8000",
+            "--no-vad",
+            "--dis-codec=speex",
+            "--dis-codec=ilbc",
+            "--add-codec=pcmu",
+            "--add-codec=pcma",
+        ]
+    return [
         "--clock-rate=8000",
         "--snd-clock-rate=8000",
         # WebRTC AEC3; long tail for handset acoustic coupling.
@@ -141,17 +158,13 @@ def _pjsua_media_args(*, null_audio: bool) -> list[str]:
         "--ec-tail=800",
         "--capture-lat=40",
         "--playback-lat=40",
-        "--capture-dev=0",
-        "--playback-dev=0",
+        "--snd-auto-close=0",
         "--no-vad",
         "--dis-codec=speex",
         "--dis-codec=ilbc",
         "--add-codec=pcmu",
         "--add-codec=pcma",
     ]
-    if null_audio:
-        args.insert(0, "--null-audio")
-    return args
 
 
 def sip_configured() -> bool:

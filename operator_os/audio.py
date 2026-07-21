@@ -20,6 +20,7 @@ from operator_os.config import AudioConfig
 
 ROOT = Path(__file__).resolve().parent.parent
 VOICES_DIR = ROOT / "voices"
+FX_DIR = ROOT / "data" / "fx"
 
 # Named voices: onnx + matching .onnx.json beside it.
 VOICE_MODELS: dict[str, Path] = {
@@ -178,19 +179,22 @@ class AudioRouter:
           fx_outside — outside-line seize (digit 9)
         """
         key = str(name or "").strip().lower()
-        if key in ("fx_seize", "fx_release", "crossbar"):
-            self.play_crossbar_click(wait=wait)
+        if key in ("fx_seize", "crossbar"):
+            self.play_crossbar_click(kind="seize", wait=wait)
+            return
+        if key == "fx_release":
+            self.play_crossbar_click(kind="release", wait=wait)
             return
         if key == "fx_outside":
             self.seize_outside_line()
             return
 
-    def play_crossbar_click(self, *, wait: bool = True) -> None:
+    def play_crossbar_click(self, *, kind: str = "seize", wait: bool = True) -> None:
         """Electromechanical switch throw into the handset receiver."""
         if self._on_hook:
             return
         rate = self.cfg.sample_rate_hz
-        click = build_crossbar_click(rate)
+        click = load_fx_pcm(kind, rate) or build_crossbar_click(rate)
         duration = len(click) / (2.0 * rate)
         if self._duplex:
             self.write_duplex_playback(click, src_rate=rate)
@@ -798,20 +802,61 @@ def _tone_freqs(name_or_hz: str | float | tuple[float, ...]) -> tuple[float, ...
     return (440.0,)
 
 
+def load_fx_pcm(kind: str, rate: int) -> bytes | None:
+    """Load a short plant-FX WAV from ``data/fx/``, resampled to ``rate``.
+
+    ``kind`` is ``seize`` / ``release``. Seize picks randomly among
+    ``fx_seize*.wav`` so successive plant throws don't sound identical.
+    Returns None if missing so callers can fall back to the synth click.
+    """
+    pattern = "fx_release*.wav" if kind == "release" else "fx_seize*.wav"
+    paths = sorted(FX_DIR.glob(pattern))
+    if not paths:
+        return None
+    path = random.choice(paths)
+    try:
+        with wave.open(str(path), "rb") as w:
+            if w.getnchannels() != 1 or w.getsampwidth() != 2:
+                return None
+            src_rate = w.getframerate()
+            pcm = w.readframes(w.getnframes())
+    except (OSError, wave.Error):
+        return None
+    if not pcm:
+        return None
+    if src_rate == rate:
+        return pcm
+    # Linear resample mono S16 (clips are tiny; quality is fine).
+    src = array.array("h")
+    src.frombytes(pcm)
+    if not src:
+        return None
+    n_out = max(1, int(round(len(src) * rate / src_rate)))
+    out = array.array("h", [0] * n_out)
+    last = len(src) - 1
+    for i in range(n_out):
+        x = i * src_rate / rate
+        j = int(x)
+        frac = x - j
+        a = src[j] if j <= last else 0
+        b = src[j + 1] if j < last else a
+        out[i] = int(a + (b - a) * frac)
+    return out.tobytes()
+
+
 def build_crossbar_click(rate: int, *, seed: int = 1) -> bytes:
     """Synthesize a mechanical switch throw (mono S16_LE).
 
-    Two-stage crossbar feel: armature pull-in, then contact slap + metallic
-    ring. Peaks well above dial-tone amplitude (_TONE_AMP=0.15). Leading
-    silence covers USB/ALSA open latency so the transient is not eaten.
+    Two distinct clicks: armature pull-in, gap, then contact slap + ring.
+    Leading silence covers USB/ALSA open latency so the transient is not eaten.
     """
     rng = random.Random(seed)
     lead = int(rate * 0.080)
-    # Stage gap: soft clunk, then hard contacts ~28 ms later.
-    gap = int(rate * 0.028)
-    body = int(rate * 0.160)
-    tail = int(rate * 0.050)
-    n = lead + gap + body + tail
+    gap = int(rate * 0.045)
+    stage1 = int(rate * 0.055)
+    stage2 = int(rate * 0.090)
+    tail = int(rate * 0.040)
+    n = lead + stage1 + gap + stage2 + tail
     mix = [0.0] * n
 
     def _add_noise(start: int, dur_s: float, amp: float, tau_s: float) -> None:
@@ -842,23 +887,24 @@ def build_crossbar_click(rate: int, *, seed: int = 1) -> bytes:
                 break
             mix[idx] += amp if (i % 2 == 0) else -amp
 
-    # --- Stage 1: armature starts moving (dull cabinet thud) ---
+    # --- Click 1: armature pull-in (duller, lower) ---
     a0 = lead
-    _add_sine(a0, 0.055, 95.0, 0.42, 0.022)
-    _add_sine(a0, 0.040, 55.0, 0.28, 0.018)
-    _add_noise(a0, 0.020, 0.22, 0.008)
+    _add_sine(a0, 0.045, 90.0, 0.50, 0.018)
+    _add_sine(a0, 0.035, 50.0, 0.32, 0.015)
+    _add_noise(a0, 0.012, 0.28, 0.005)
+    _add_pop(a0, 0.0012, 0.40)
 
-    # --- Stage 2: contacts slam (the satisfying switch) ---
-    c0 = lead + gap
-    _add_pop(c0, 0.0015, 0.85)  # micro-arc / contact make
-    _add_noise(c0, 0.018, 0.70, 0.004)  # spring / blade snap
-    _add_sine(c0, 0.070, 140.0, 0.55, 0.020)  # solenoid body
-    _add_sine(c0, 0.045, 1100.0, 0.28, 0.010)  # metal ring
-    _add_sine(c0, 0.035, 2400.0, 0.16, 0.006)  # bright edge
-    # Contact bounce — tiny second make ~12 ms later.
-    b0 = c0 + int(rate * 0.012)
-    _add_pop(b0, 0.0010, 0.45)
-    _add_noise(b0, 0.010, 0.30, 0.003)
+    # --- Click 2: contacts slam (brighter, after a clear gap) ---
+    c0 = lead + stage1 + gap
+    _add_pop(c0, 0.0015, 0.90)
+    _add_noise(c0, 0.016, 0.72, 0.0035)
+    _add_sine(c0, 0.065, 145.0, 0.58, 0.018)
+    _add_sine(c0, 0.040, 1200.0, 0.30, 0.009)
+    _add_sine(c0, 0.030, 2600.0, 0.18, 0.005)
+    # Contact bounce ~14 ms later
+    b0 = c0 + int(rate * 0.014)
+    _add_pop(b0, 0.0010, 0.40)
+    _add_noise(b0, 0.008, 0.25, 0.0025)
 
     out = array.array("h")
     for v in mix:

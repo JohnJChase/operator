@@ -7,6 +7,7 @@ Two ways to reach services on the WE302:
 | `0` | **Local operator** — spoken dial menu (no cloud) |
 | `1` / `2` | News / weather (cached) |
 | `3` | **WAMU 88.5** — live NPR stream ([playlist](https://static.wamu.org/streams/live/1/mp3.1.pls)) |
+| `4` | **NWS radio** — NOAA Weather Radio KHB36 ([stream](https://stream.mikev.com/khb36.mp3)) |
 | `8` | **Realtime information operator** — live voice via GPT Realtime |
 | `9` | **Outside line** — Telnyx SIP (`docs/sip-outside-line.md`) |
 
@@ -14,7 +15,7 @@ Two ways to reach services on the WE302:
 
 Speaks:
 
-> Operator. Dial 1 for news, 2 for weather, 3 for WAMU,
+> Operator. Dial 1 for news, 2 for weather, 3 for WAMU, 4 for weather radio,
 > 8 for the information operator, 9 for outside line. Dial 0 to hear this again.
 
 Then returns to dial tone so you can dial the next digit. Hangup cuts a live
