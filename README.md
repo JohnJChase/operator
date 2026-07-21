@@ -20,9 +20,13 @@ just selftest
 ## Run
 
 ```bash
-just simulate                          # no GPIO
-uv run operator-os simulate --script off,digit:1,hangup
-just run                               # live hook/dial/ring/audio
+just simulate
+just simulate --script off,digit:1,hangup
+just run
+just status
+just speak-test
+just mic-test
+just --list          # all recipes
 ```
 
 Rev A pins: hook GPIO17, dial GPIO10, ring GPIO23. Audio: ATR2x `plughw:2,0`.

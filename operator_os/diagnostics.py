@@ -85,12 +85,46 @@ def audio_test(profile: HardwareProfile, hz: float = 440.0, seconds: float = 2.0
 
 
 def mic_test(profile: HardwareProfile, seconds: float = 5.0) -> int:
+    from operator_os.audio import analyze_wav_levels
+
     out = Path("data/recordings/mic-test.wav")
     audio = AudioRouter(profile.audio)
     audio.set_hook(off_hook=True)
     print(f"Recording {seconds:.0f}s to {out}")
     audio.record(seconds, out)
-    print(f"Wrote {out} ({out.stat().st_size} bytes)")
+    levels = analyze_wav_levels(out)
+    print(
+        f"{levels.duration_s:.2f}s {levels.sample_rate_hz} Hz  "
+        f"peak={levels.peak_dbfs:.1f} dBFS  rms={levels.rms_dbfs:.1f} dBFS  "
+        f"clips={levels.clip_samples}"
+    )
+    print(f"verdict: {levels.verdict} — {levels.detail}")
+    audio.close()
+    return 0 if levels.ok else 1
+
+
+def speak_test(profile: HardwareProfile, text: str = "This is the operator.") -> int:
+    audio = AudioRouter(profile.audio)
+    audio.set_hook(off_hook=True)
+    print(f"tts engine={audio.engine}")
+    print(f"voice={profile.audio.piper_voice}")
+    print(f"model={audio.model_path}")
+    if audio.engine != "piper":
+        print("WARNING: Piper not loaded; using espeak fallback", file=sys.stderr)
+    audio.speak(text)
+    audio.close()
+    return 0 if audio.engine == "piper" else 1
+
+
+def crossbar_test(profile: HardwareProfile) -> int:
+    """Play the outside-line seize effect once (click → silence → dial tone)."""
+    audio = AudioRouter(profile.audio)
+    audio.set_hook(off_hook=True)
+    print("crossbar seize: click/thud → blind spot → external dial tone (2s)")
+    audio.seize_outside_line()
+    time.sleep(2.0)
+    audio.close()
+    print("done")
     return 0
 
 

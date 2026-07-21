@@ -48,8 +48,8 @@ def handle_digit(digit: int) -> ServiceResult:
     if digit == 9:
         return ServiceResult(
             digit=9,
-            kind="effect_then_speak",
-            text="Outside line is not yet available.",
+            kind="outside_seize",
+            text="Outside line.",
         )
     if 3 <= digit <= 8:
         return ServiceResult(

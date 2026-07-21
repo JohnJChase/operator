@@ -47,6 +47,7 @@ class AudioConfig:
     channels: int
     format: str
     piper_voice: str
+    piper_volume: float = 0.6
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,7 @@ def load_profile(path: Path | str | None = None) -> HardwareProfile:
     hook = gpio["hook"]
     ring = gpio["ring"]
     audio = data["audio"]
+    tts = audio.get("tts", {})
     timing = data.get("timing", {})
     cadence = ring.get("cadence", {})
 
@@ -101,7 +103,8 @@ def load_profile(path: Path | str | None = None) -> HardwareProfile:
             sample_rate_hz=int(audio.get("sample_rate_hz", 16000)),
             channels=int(audio.get("channels", 1)),
             format=str(audio.get("format", "S16_LE")),
-            piper_voice=str(audio.get("tts", {}).get("piper_voice", "en_US-hfc_female-medium")),
+            piper_voice=str(tts.get("piper_voice", "hfc_female")),
+            piper_volume=float(tts.get("piper_volume", 0.6)),
         ),
         raw=data,
     )

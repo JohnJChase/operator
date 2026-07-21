@@ -15,7 +15,6 @@ def test_digit_one_missing_cache():
     assert "not yet" in r.text.lower()
 
 
-def test_digit_nine_outside_unavailable():
+def test_digit_nine_outside_seize():
     r = handle_digit(9)
-    assert r.kind == "effect_then_speak"
-    assert "not yet available" in r.text.lower()
+    assert r.kind == "outside_seize"

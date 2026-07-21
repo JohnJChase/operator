@@ -87,7 +87,8 @@ audio:
   tts:
     engine: piper
     fallback: espeak
-    piper_voice: en_US-hfc_female-medium
+    # Named voice resolved under voices/; onnx weights are gitignored (just setup-voices).
+    piper_voice: hfc_female
     piper_volume: 0.6
     espeak_amplitude: 40
     resample_tts_to_hz: 16000

@@ -34,6 +34,9 @@ audio_cache/
 news.mp3
 news.json
 
+# Piper voice weights (large); keep .onnx.json and install via just setup-voices
+voices/**/*.onnx
+
 # Local reference dumps and generated heavy renders
 tmp/
 *.jpg

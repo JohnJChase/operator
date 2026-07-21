@@ -6,8 +6,9 @@ Date: 2026-07-20
 
 - Python 3.13 (system `/usr/bin/python3.13`; pinned in `.python-version`)
 - `uv` + project-local `.venv` + `uv.lock`
-- `just` task runner
+- `just` task runner (preferred CLI front door)
 - System packages: `alsa-utils`, `espeak-ng`, `python3-lgpio`
+- Python: `piper-tts` in the project venv (see TTS below)
 
 ## Setup
 
@@ -21,22 +22,37 @@ just setup
 use the OS `python3-lgpio` pin factory on Raspberry Pi OS. A plain
 `uv sync` without that flag will fail GPIO open with `BadPinFactory`.
 
+Prefer `just <recipe>` over `uv run operator-os ...`. The just recipes are thin
+wrappers; use `uv run` only when you need argparse flags that a recipe does not
+expose yet (`just --list` shows what exists).
+
+## TTS (Piper)
+
+Default voice: `hfc_female` (`en_US-hfc_female-medium`).
+
+```bash
+just setup-voices
+just status          # must show tts=piper
+just speak-test
+```
+
+espeak-ng is fallback only. Weights live in `voices/hfc_female/*.onnx`
+(gitignored).
+
 ## Commands
 
 ```bash
-just test           # simulator unit tests
-just selftest       # software selftest
-just test-hardware  # GPIO + short tone
-just simulate       # interactive simulator
-just run            # live phone loop
-```
-
-Hardware-only:
-
-```bash
-uv run operator-os trace-hook
-uv run operator-os trace-dial
-uv run operator-os ring-test --seconds 2
-uv run operator-os audio-test --tone 440
-uv run operator-os mic-test --seconds 5
+just --list
+just test
+just selftest
+just test-hardware
+just simulate
+just run
+just status
+just trace-hook
+just trace-dial
+just ring-test          # just ring-test 2
+just audio-test         # just audio-test 440 2
+just mic-test           # just mic-test 5
+just speak-test         # just speak-test "Operator."
 ```

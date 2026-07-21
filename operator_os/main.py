@@ -48,6 +48,9 @@ def main(argv: list[str] | None = None) -> None:
     at.add_argument("--seconds", type=float, default=2.0)
     mt = sub.add_parser("mic-test", help="record from handset mic")
     mt.add_argument("--seconds", type=float, default=5.0)
+    sp = sub.add_parser("speak-test", help="speak a phrase (reports Piper vs espeak)")
+    sp.add_argument("--text", default="This is the operator.")
+    sub.add_parser("crossbar-test", help="play outside-line seize click + dial tone")
     sub.add_parser("status", help="print profile and current state summary")
 
     args = parser.parse_args(argv)
@@ -66,11 +69,21 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(audio_test(profile, hz=args.tone, seconds=args.seconds))
     if args.cmd == "mic-test":
         raise SystemExit(mic_test(profile, seconds=args.seconds))
+    if args.cmd == "speak-test":
+        from operator_os.diagnostics import speak_test
+
+        raise SystemExit(speak_test(profile, text=args.text))
+    if args.cmd == "crossbar-test":
+        from operator_os.diagnostics import crossbar_test
+
+        raise SystemExit(crossbar_test(profile))
     if args.cmd == "status":
         print(f"profile={profile.name}")
         print(f"hook={profile.gpio.hook_bcm} dial={profile.gpio.dial_pulse_bcm} "
               f"ring={profile.gpio.ring_bcm}")
         print(f"audio={profile.audio.alsa_device}")
+        audio = AudioRouter(profile.audio)
+        print(f"tts={audio.engine} voice={profile.audio.piper_voice} model={audio.model_path}")
         raise SystemExit(0)
     if args.cmd == "simulate":
         phone = SimulatorPhone(profile)
@@ -85,7 +98,7 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(run_loop(phone, audio, events, profile, live_audio=True))
         finally:
             phone.close()
-            audio.stop()
+            audio.close()
 
 
 def run_loop(
@@ -97,9 +110,13 @@ def run_loop(
     live_audio: bool,
     max_seconds: float | None = None,
 ) -> int:
+    """Main telephone loop. GPIO callbacks only enqueue; audio runs here."""
+    import queue
+
     ctl = PhoneController()
     decoder = phone.decoder  # type: ignore[attr-defined]
     stop_at = time.monotonic() + max_seconds if max_seconds else None
+    q: queue.SimpleQueue[tuple] = queue.SimpleQueue()
 
     def _status(msg: str) -> None:
         print(msg, flush=True)
@@ -110,37 +127,50 @@ def run_loop(
         if tr.reason:
             _status(f"state={ctl.state.value}  ({tr.reason})")
 
-    def on_hook(off_hook: bool) -> None:
-        if off_hook:
-            events.emit("hook", value="off_hook")
-            _status("hook=OFF_HOOK")
-            apply(ctl.handle(Event("off_hook")))
-            audio.set_hook(True)
-        else:
-            events.emit("hook", value="on_hook")
-            _status("hook=ON_HOOK")
-            apply(ctl.handle(Event("on_hook")))
-            audio.set_hook(False)
+    # GPIO/sim callbacks must not touch audio — stop() used to block pulse ISR.
+    phone.on_hook_change(lambda off: q.put(("hook", off)))
+    phone.on_pulse(lambda: q.put(("pulse", decoder.pending_pulses)))
 
-    phone.on_hook_change(on_hook)
-
-    def on_pulse() -> None:
-        if ctl.state == State.DIAL_TONE:
-            apply(ctl.handle(Event("pulse")))
-        _status(f"pulse #{decoder.pending_pulses}")
-
-    phone.on_pulse(on_pulse)
-
-    # Sync initial hook
     if phone.is_off_hook() and ctl.state == State.ON_HOOK_IDLE:
-        on_hook(True)
+        q.put(("hook", True))
 
     _status(f"state={ctl.state.value}  (lift handset; Ctrl+C to quit)")
     try:
         while True:
             if stop_at and time.monotonic() >= stop_at:
                 return 0
+
+            while True:
+                try:
+                    kind, value = q.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "hook":
+                    if value:
+                        events.emit("hook", value="off_hook")
+                        _status("hook=OFF_HOOK")
+                        apply(ctl.handle(Event("off_hook")))
+                        audio.set_hook(True)
+                    else:
+                        events.emit("hook", value="on_hook")
+                        _status("hook=ON_HOOK")
+                        apply(ctl.handle(Event("on_hook")))
+                        audio.set_hook(False)
+                        decoder.reset()
+                elif kind == "pulse":
+                    if ctl.state == State.DIAL_TONE:
+                        apply(ctl.handle(Event("pulse")))
+                    elif ctl.state not in (State.DIAL_TONE, State.COLLECTING_DIGIT):
+                        # Ignore dial chatter during announcements / outside tone.
+                        decoder.reset()
+                        continue
+                    _status(f"pulse #{value}")
+
             now_ms = time.monotonic() * 1000
+            if ctl.state not in (State.DIAL_TONE, State.COLLECTING_DIGIT):
+                time.sleep(0.02)
+                continue
+
             digit = decoder.poll(now_ms)
             if digit is not None:
                 pulses = 10 if digit == 0 else digit
@@ -153,14 +183,36 @@ def run_loop(
                     **{"from": prev.value, "to": tr.state.value, "reason": tr.reason},
                 )
                 apply(tr)
-                _play_service(handle_digit(digit), audio, events, live_audio)
-                if ctl.state == State.PLAYING_SERVICE:
+                decoder.reset()
+                result = handle_digit(digit)
+                _play_service(result, audio, events, live_audio)
+                # Dial activity during TTS must not become a digit after the announcement.
+                decoder.reset()
+                _flush_queue_pulses(q)
+                # Outside-line seize leaves external dial tone running until hangup.
+                if ctl.state == State.PLAYING_SERVICE and result.kind != "outside_seize":
                     apply(ctl.handle(Event("service_done")))
             time.sleep(0.02)
     except KeyboardInterrupt:
         _status("quit")
         apply(ctl.handle(Event("hangup")))
         return 0
+
+
+def _flush_queue_pulses(q) -> None:
+    """Drop queued pulse notifications; keep hook events."""
+    import queue as _queue
+
+    kept: list[tuple] = []
+    while True:
+        try:
+            item = q.get_nowait()
+        except _queue.Empty:
+            break
+        if item[0] != "pulse":
+            kept.append(item)
+    for item in kept:
+        q.put(item)
 
 
 def _do_action(action, phone, audio, events, ctl, live_audio) -> None:
@@ -173,7 +225,7 @@ def _do_action(action, phone, audio, events, ctl, live_audio) -> None:
     elif action == "dial_tone":
         if live_audio:
             audio.set_hook(True)
-            audio.play_tone("dial", seconds=30.0, wait=False)
+            audio.play_tone("dial", wait=False)
         events.emit("audio", value="dial_tone")
     elif action == "play_service":
         pass  # handled after digit via _play_service
@@ -186,6 +238,9 @@ def _play_service(result: ServiceResult, audio: AudioRouter, events: EventLog, l
     events.emit("service", digit=result.digit, kind=result.kind)
     print(f"service digit={result.digit} kind={result.kind}: {result.text or result.path}", flush=True)
     if not live:
+        return
+    if result.kind == "outside_seize":
+        audio.seize_outside_line()
         return
     audio.stop()
     if result.kind == "play_file" and result.path:
@@ -228,8 +283,9 @@ def _run_script(phone: SimulatorPhone, audio: AudioRouter, events: EventLog, scr
             tr = ctl.handle(Event("digit", value=digit))
             events.emit("digit", value=digit)
             events.emit("state", **{"to": tr.state.value, "reason": tr.reason})
-            _play_service(handle_digit(digit), audio, events, live=False)
-            if ctl.state == State.PLAYING_SERVICE:
+            result = handle_digit(digit)
+            _play_service(result, audio, events, live=False)
+            if ctl.state == State.PLAYING_SERVICE and result.kind != "outside_seize":
                 ctl.handle(Event("service_done"))
             print(f"-> digit {digit} => {ctl.state.value}")
         elif step.startswith("pulses:"):
@@ -287,8 +343,9 @@ def _simulate_repl(phone: SimulatorPhone, audio: AudioRouter, events: EventLog) 
                 ctl.handle(Event("pulse"))
             tr = ctl.handle(Event("digit", value=got))
             events.emit("digit", value=got)
-            _play_service(handle_digit(got), audio, events, live=False)
-            if ctl.state == State.PLAYING_SERVICE:
+            result = handle_digit(got)
+            _play_service(result, audio, events, live=False)
+            if ctl.state == State.PLAYING_SERVICE and result.kind != "outside_seize":
                 ctl.handle(Event("service_done"))
             print(f"digit {got} -> {tr.state.value}")
             continue
