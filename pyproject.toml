@@ -8,6 +8,7 @@ dependencies = [
     "gpiozero>=2.0",
     "piper-tts>=1.5.0",
     "pyyaml>=6.0",
+    "websocket-client>=1.9.0",
 ]
 
 [project.optional-dependencies]

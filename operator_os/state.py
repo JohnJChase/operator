@@ -1,4 +1,8 @@
-"""Telephone state machine. Deterministic transitions; no GPIO callbacks here."""
+"""Telephone state machine. Deterministic transitions; no GPIO callbacks here.
+
+Plant audio (fx_seize / fx_release / fx_outside) lives on the transition
+actions — the chart throws the switch when the circuit changes.
+"""
 
 from __future__ import annotations
 
@@ -48,6 +52,14 @@ class PhoneController:
         return result
 
 
+def _service_actions(digit: Any, *, stop_audio: bool) -> tuple[str, ...]:
+    """Plant FX + play_service (or outside seize) for a committed digit."""
+    prefix: tuple[str, ...] = ("audio_stop",) if stop_audio else ()
+    if digit == 9:
+        return prefix + ("fx_outside",)
+    return prefix + ("fx_seize", "play_service")
+
+
 def _transition(state: State, event: Event) -> Transition:
     et = event.type
 
@@ -81,7 +93,7 @@ def _transition(state: State, event: Event) -> Transition:
         if et == "digit":
             return Transition(
                 State.PLAYING_SERVICE,
-                actions=("audio_stop", "play_service"),
+                actions=_service_actions(event.value, stop_audio=True),
                 reason=f"digit_{event.value}",
             )
         if et == "pulse":
@@ -96,18 +108,22 @@ def _transition(state: State, event: Event) -> Transition:
         if et == "digit":
             return Transition(
                 State.PLAYING_SERVICE,
-                actions=("play_service",),
+                actions=_service_actions(event.value, stop_audio=False),
                 reason=f"digit_{event.value}",
             )
         return Transition(state)
 
     if state == State.PLAYING_SERVICE:
         if et == "service_done":
-            return Transition(State.DIAL_TONE, actions=("dial_tone",), reason="service_done")
+            return Transition(
+                State.DIAL_TONE,
+                actions=("fx_release", "dial_tone"),
+                reason="service_done",
+            )
         if et == "digit":
             return Transition(
                 State.PLAYING_SERVICE,
-                actions=("audio_stop", "play_service"),
+                actions=_service_actions(event.value, stop_audio=True),
                 reason=f"digit_{event.value}",
             )
         return Transition(state)

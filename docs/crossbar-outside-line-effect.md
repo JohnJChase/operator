@@ -6,12 +6,15 @@ WE302 receiver; the capsule provides natural telephone EQ — do not over-filter
 
 ## Sound layers (synthesize, do not need Audacity)
 
-Layer these into one short transient, peaking ~3–6 dB above internal dial tone:
+Layer these into one short **two-stage** transient, peaking well above internal
+dial tone:
 
-1. **DC spark (pop)** — 1–2 ms single-cycle square / spike (micro-arc tick).
-2. **Spring snap (click)** — 15–20 ms white noise, instant attack, fast
-   exponential decay.
-3. **Solenoid slap (thud)** — 120–150 Hz sine, 40–60 ms decay (closet magnet).
+1. **Armature pull-in** — dull low thud (~55–95 Hz) as the magnet starts moving.
+2. **Contact slap** (~25–30 ms later) — micro-arc pop + spring snap noise +
+   solenoid body (~140 Hz) + brief metallic ring (~1–2.5 kHz).
+3. **Contact bounce** — tiny second make a few ms after the slap.
+
+That “clunk…CLACK” is what reads as a mechanical switch on the WE302 receiver.
 
 ## Timeline after digit `9`
 

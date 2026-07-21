@@ -64,6 +64,12 @@ crossbar-test:
 operator-test text="What is the weather?":
     uv run operator-os operator-test --text "{{text}}"
 
+realtime-tune:
+    uv run operator-os realtime-tune
+
+realtime-autotune:
+    uv run operator-os realtime-autotune
+
 refresh *args:
     uv run operator-os refresh {{args}}
 

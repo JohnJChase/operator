@@ -87,7 +87,7 @@ def refresh_all(profile: HardwareProfile, *, weather: bool = True, news: bool = 
     return rc
 
 
-def refresh_weather(profile: HardwareProfile) -> Path:
+def refresh_weather(profile: HardwareProfile, *, synthesize: bool = True) -> Path:
     providers = profile.raw.get("providers", {})
     weather_cfg = providers.get("weather", {})
     lat = weather_cfg.get("latitude")
@@ -122,19 +122,20 @@ def refresh_weather(profile: HardwareProfile) -> Path:
         "current": raw.get("current", {}),
     }
     WEATHER_JSON.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    audio = AudioRouter(profile.audio)
-    try:
-        out = audio.synthesize(spoken, output_path=WEATHER_WAV)
-        if out is None:
-            print("weather: json ok, TTS wav failed (digit 2 will speak text)", flush=True)
-        else:
-            print(f"weather audio: {WEATHER_WAV}", flush=True)
-    finally:
-        audio.close()
+    if synthesize:
+        audio = AudioRouter(profile.audio)
+        try:
+            out = audio.synthesize(spoken, output_path=WEATHER_WAV)
+            if out is None:
+                print("weather: json ok, TTS wav failed (digit 2 will speak text)", flush=True)
+            else:
+                print(f"weather audio: {WEATHER_WAV}", flush=True)
+        finally:
+            audio.close()
     return WEATHER_JSON
 
 
-def refresh_news(profile: HardwareProfile) -> dict[str, Path]:
+def refresh_news(profile: HardwareProfile, *, synthesize: bool = True) -> dict[str, Path]:
     api_key = os.environ.get("NEWSDATA_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError(
@@ -171,16 +172,17 @@ def refresh_news(profile: HardwareProfile) -> dict[str, Path]:
     }
     NEWS_JSON.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
-    audio = AudioRouter(profile.audio)
-    try:
-        out = audio.synthesize(spoken, output_path=NEWS_WAV)
-        if out is None:
-            raise RuntimeError("TTS failed while rendering news.wav")
-    finally:
-        audio.close()
-
-    # Prefer wav for aplay; leave any stale mp3 alone.
-    return {"json": NEWS_JSON, "audio": NEWS_WAV}
+    out: dict[str, Path] = {"json": NEWS_JSON}
+    if synthesize:
+        audio = AudioRouter(profile.audio)
+        try:
+            wav = audio.synthesize(spoken, output_path=NEWS_WAV)
+            if wav is None:
+                raise RuntimeError("TTS failed while rendering news.wav")
+            out["audio"] = NEWS_WAV
+        finally:
+            audio.close()
+    return out
 
 
 def format_weather_spoken(payload: dict[str, Any], *, location_label: str) -> str:

@@ -6,13 +6,24 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+# WAMU 88.5 HD-1 — live NPR from American University Radio.
+WAMU_PLS = "https://static.wamu.org/streams/live/1/mp3.1.pls"
+
+LOCAL_MENU = (
+    "Operator. Dial 1 for news, 2 for weather, "
+    "3 for WAMU, "
+    "8 for the information operator, 9 for outside line. "
+    "Dial 0 to hear this again."
+)
+
 
 @dataclass(frozen=True)
 class ServiceResult:
     digit: int
-    kind: str  # speak | play_file | effect_then_speak | outside_seize | operator
+    kind: str  # speak | play_file | stream | outside_seize | realtime_operator | …
     text: str
     path: Path | None = None
+    url: str | None = None
 
 
 NEWS_AUDIO_CANDIDATES = (Path("data/news.wav"), Path("data/news.mp3"))
@@ -23,11 +34,7 @@ WEATHER_CACHE = Path("data/weather.json")
 
 def handle_digit(digit: int) -> ServiceResult:
     if digit == 0:
-        return ServiceResult(
-            digit=0,
-            kind="operator",
-            text="",
-        )
+        return ServiceResult(digit=0, kind="speak", text=LOCAL_MENU)
     if digit == 1:
         audio = _first_existing(NEWS_AUDIO_CANDIDATES)
         if audio is not None:
@@ -51,13 +58,22 @@ def handle_digit(digit: int) -> ServiceResult:
             kind="speak",
             text="Weather Bureau report is not yet on file. Please try again later.",
         )
+    if digit == 3:
+        return ServiceResult(
+            digit=3,
+            kind="stream",
+            text="WAMU 88.5",
+            url=WAMU_PLS,
+        )
+    if digit == 8:
+        return ServiceResult(digit=8, kind="realtime_operator", text="")
     if digit == 9:
         return ServiceResult(
             digit=9,
             kind="outside_seize",
             text="Outside line.",
         )
-    if 3 <= digit <= 8:
+    if 4 <= digit <= 7:
         return ServiceResult(
             digit=digit,
             kind="speak",

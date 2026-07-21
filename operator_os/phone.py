@@ -37,6 +37,93 @@ class PhoneIO:
         return
 
 
+def attach_hook_cutoff(
+    phone: PhoneIO,
+    audio: "AudioRouter",
+    *,
+    on_hangup: Callable[[], None] | None = None,
+) -> None:
+    """Hook switch = hardware kill. Hangup stops all audio immediately.
+
+    Wire this for every path that owns a handset (run loop, tune, diagnostics)
+    unless the command explicitly documents that it ignores the hook.
+    """
+    from operator_os.audio import AudioRouter
+
+    assert isinstance(audio, AudioRouter)
+
+    def _on_hook(off_hook: bool) -> None:
+        if off_hook:
+            audio.set_hook(True)
+            return
+        audio.notify_hangup()
+        if on_hangup is not None:
+            on_hangup()
+
+    phone.on_hook_change(_on_hook)
+    # Sync audio to current cradle state (default AudioRouter is on-hook).
+    if phone.is_off_hook():
+        audio.set_hook(True)
+    else:
+        audio.notify_hangup()
+
+
+def wait_off_hook(
+    phone: PhoneIO,
+    audio: "AudioRouter | None" = None,
+    *,
+    prompt: str = "Lift handset…",
+    allow_enter: bool = True,
+) -> bool:
+    """Block until the handset is off-hook (hook is the power switch).
+
+    Returns True if GPIO reported off-hook, False if the user pressed Enter to
+    continue (benches only — GPIO may still be wrong).
+    """
+    if phone.is_off_hook():
+        print("handset off-hook — continuing", flush=True)
+        if audio is not None:
+            audio.set_hook(True)
+        return True
+    print(prompt, flush=True)
+    if allow_enter:
+        print("  (or press Enter if already off-hook and this is stuck)", flush=True)
+    last_status = 0.0
+    while True:
+        if phone.is_off_hook():
+            print("handset off-hook — continuing", flush=True)
+            if audio is not None:
+                audio.set_hook(True)
+            return True
+        now = time.monotonic()
+        if now - last_status >= 1.0:
+            print("  still on-hook…", flush=True)
+            last_status = now
+        if allow_enter and _stdin_enter_pressed():
+            print("  Enter — continuing (forcing off-hook for this session)", flush=True)
+            if audio is not None:
+                audio.set_hook(True)
+            return False
+        time.sleep(0.05)
+
+
+def _stdin_enter_pressed() -> bool:
+    """Non-blocking check for Enter on stdin (TTY benches)."""
+    import select
+    import sys
+
+    if not sys.stdin.isatty():
+        return False
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], 0)
+    except (OSError, ValueError):
+        return False
+    if not ready:
+        return False
+    line = sys.stdin.readline()
+    return True  # any line / Enter
+
+
 @dataclass
 class SimulatorPhone(PhoneIO):
     """In-memory phone for tests and `operator-os simulate`."""

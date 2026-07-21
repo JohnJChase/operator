@@ -22,15 +22,17 @@ just setup
 use the OS `python3-lgpio` pin factory on Raspberry Pi OS. A plain
 `uv sync` without that flag will fail GPIO open with `BadPinFactory`.
 
-## Hook priority (interrupt)
+## Hook priority (hardware cutoff)
 
-The switchhook is the highest-priority input — treat it like an interrupt:
+The switchhook is a kill switch — hangup stops everything:
 
-1. **GPIO hangup callback** calls `audio.notify_hangup()` / `stop()` immediately
-   (cuts the receiver even if the main loop is between ticks).
-2. **Main loop** drains hook events before dial pulses every iteration.
-3. **Service audio** (news, weather, announcements) starts non-blocking so the
-   loop can always observe hangup; never `wait=True` on long playback in `run`.
+1. **GPIO hangup** → `audio.notify_hangup()` marks on-hook and kills aplay/arecord
+   immediately (GPIO-thread safe). Realtime sessions `cancel_now()` in the same path.
+2. **AudioRouter** refuses new playback, duplex, and mic capture while on-hook
+   (so TTS finishing after hangup cannot restart the earpiece).
+3. **Main loop** drains hook events before dial pulses every iteration.
+4. **Tune / autotune / diagnostics** use `attach_hook_cutoff` — hang up aborts them too.
+5. **Service audio** starts non-blocking so the loop can always observe hangup.
 
 Pulse callbacks only enqueue counts — they must not call audio.
 
@@ -67,6 +69,7 @@ just audio-test         # just audio-test 440 2
 just mic-test           # just mic-test 5
 just speak-test         # just speak-test "Operator."
 just crossbar-test
+just operator-test      # Realtime text smoke (needs OPENAI_API_KEY)
 ```
 
 ## Appliance (systemd)

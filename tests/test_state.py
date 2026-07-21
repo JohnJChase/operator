@@ -36,7 +36,29 @@ def test_pickup_to_digit_to_service():
     ctl.handle(Event("off_hook"))
     ctl.handle(Event("pulse"))
     assert ctl.state == State.COLLECTING_DIGIT
-    ctl.handle(Event("digit", value=2))
+    tr = ctl.handle(Event("digit", value=2))
     assert ctl.state == State.PLAYING_SERVICE
-    ctl.handle(Event("service_done"))
+    assert "fx_seize" in tr.actions
+    assert "play_service" in tr.actions
+    tr = ctl.handle(Event("service_done"))
     assert ctl.state == State.DIAL_TONE
+    assert "fx_release" in tr.actions
+    assert "dial_tone" in tr.actions
+
+
+def test_digit_from_dial_tone_seizes_plant():
+    ctl = PhoneController()
+    ctl.handle(Event("off_hook"))
+    tr = ctl.handle(Event("digit", value=1))
+    assert ctl.state == State.PLAYING_SERVICE
+    assert tr.actions == ("audio_stop", "fx_seize", "play_service")
+
+
+def test_digit_nine_is_outside_plant_only():
+    ctl = PhoneController()
+    ctl.handle(Event("off_hook"))
+    tr = ctl.handle(Event("digit", value=9))
+    assert ctl.state == State.PLAYING_SERVICE
+    assert "fx_outside" in tr.actions
+    assert "play_service" not in tr.actions
+    assert "fx_seize" not in tr.actions

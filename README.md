@@ -36,4 +36,4 @@ diagnostics. See `docs/pi-dev-environment.md` and
 `docs/hardware-profile-verified.md`.
 
 Leave-it-plugged-in: `docs/systemd.md` + `deploy/operator-os.service`.
-AI operator (digit 0): `docs/ai-operator.md`.
+Operator modes (digit 0 menu, digit 8 Realtime): `docs/ai-operator.md`.

@@ -76,22 +76,41 @@ def ring_test(profile: HardwareProfile, seconds: float = 2.0) -> int:
 
 
 def audio_test(profile: HardwareProfile, hz: float = 440.0, seconds: float = 2.0) -> int:
+    from operator_os.phone import GpioPhone, attach_hook_cutoff, wait_off_hook
+
     audio = AudioRouter(profile.audio)
-    audio.set_hook(off_hook=True)
-    print(f"Playing {hz} Hz for {seconds:.1f}s on {profile.audio.alsa_device}")
+    phone = GpioPhone(profile)
+    attach_hook_cutoff(phone, audio)
+    wait_off_hook(phone, audio, prompt="Lift handset for audio test…")
+    print(f"Playing {hz} Hz for {seconds:.1f}s on {profile.audio.alsa_device} (hang up to cut)")
     audio.play_tone(hz, seconds=seconds, wait=True)
-    audio.stop()
+    phone.close()
+    audio.close()
     return 0
 
 
 def mic_test(profile: HardwareProfile, seconds: float = 5.0) -> int:
     from operator_os.audio import analyze_wav_levels
+    from operator_os.phone import GpioPhone, attach_hook_cutoff, wait_off_hook
 
     out = Path("data/recordings/mic-test.wav")
     audio = AudioRouter(profile.audio)
-    audio.set_hook(off_hook=True)
-    print(f"Recording {seconds:.0f}s to {out}")
-    audio.record(seconds, out)
+    phone = GpioPhone(profile)
+    attach_hook_cutoff(phone, audio)
+    wait_off_hook(phone, audio, prompt="Lift handset for mic test…")
+    print(f"Recording {seconds:.0f}s to {out} (hang up to abort)")
+    try:
+        audio.record(seconds, out)
+    except RuntimeError as e:
+        print(f"aborted: {e}")
+        phone.close()
+        audio.close()
+        return 1
+    if audio.is_on_hook or not out.is_file():
+        print("hangup — no recording kept")
+        phone.close()
+        audio.close()
+        return 1
     levels = analyze_wav_levels(out)
     print(
         f"{levels.duration_s:.2f}s {levels.sample_rate_hz} Hz  "
@@ -99,30 +118,43 @@ def mic_test(profile: HardwareProfile, seconds: float = 5.0) -> int:
         f"clips={levels.clip_samples}"
     )
     print(f"verdict: {levels.verdict} — {levels.detail}")
+    phone.close()
     audio.close()
     return 0 if levels.ok else 1
 
 
 def speak_test(profile: HardwareProfile, text: str = "This is the operator.") -> int:
+    from operator_os.phone import GpioPhone, attach_hook_cutoff, wait_off_hook
+
     audio = AudioRouter(profile.audio)
-    audio.set_hook(off_hook=True)
+    phone = GpioPhone(profile)
+    attach_hook_cutoff(phone, audio)
+    wait_off_hook(phone, audio, prompt="Lift handset for speak test…")
     print(f"tts engine={audio.engine}")
     print(f"voice={profile.audio.piper_voice}")
     print(f"model={audio.model_path}")
     if audio.engine != "piper":
         print("WARNING: Piper not loaded; using espeak fallback", file=sys.stderr)
     audio.speak(text)
+    phone.close()
     audio.close()
     return 0 if audio.engine == "piper" else 1
 
 
 def crossbar_test(profile: HardwareProfile) -> int:
     """Play the outside-line seize effect once (click → silence → dial tone)."""
+    from operator_os.phone import GpioPhone, attach_hook_cutoff, wait_off_hook
+
     audio = AudioRouter(profile.audio)
-    audio.set_hook(off_hook=True)
-    print("crossbar seize: click/thud → blind spot → external dial tone (2s)")
+    phone = GpioPhone(profile)
+    attach_hook_cutoff(phone, audio)
+    wait_off_hook(phone, audio, prompt="Lift handset for crossbar test…")
+    print("crossbar seize: click/thud → blind spot → external dial tone (hang up to cut)")
     audio.seize_outside_line()
-    time.sleep(2.0)
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not audio.is_on_hook:
+        time.sleep(0.05)
+    phone.close()
     audio.close()
     print("done")
     return 0
@@ -176,7 +208,13 @@ def selftest(profile: HardwareProfile, hardware: bool = False) -> int:
     try:
         audio = AudioRouter(profile.audio)
         print(f"tts: {audio.engine} model={audio.model_path}")
-        audio.set_hook(off_hook=True)
+        from operator_os.phone import attach_hook_cutoff, wait_off_hook
+
+        assert phone is not None
+        # Re-open phone for audio (closed above) — keep fail-safe ring off.
+        phone = GpioPhone(profile)
+        attach_hook_cutoff(phone, audio)
+        wait_off_hook(phone, audio, prompt="Lift handset for selftest audio…")
         audio.play_tone(440, seconds=0.3, wait=True)
         print("audio playback: ok (440 Hz)")
         # Short mic capture + level check (no secret paths printed beyond data/).
@@ -192,9 +230,16 @@ def selftest(profile: HardwareProfile, hardware: bool = False) -> int:
         if levels.verdict == "BAD":
             rc = 1
         audio.close()
+        phone.close()
+        phone = None
     except Exception as e:
         print(f"audio/mic: FAIL ({e})", file=sys.stderr)
         rc = 1
+        try:
+            if phone is not None:
+                phone.close()
+        except Exception:
+            pass
 
     print("hardware selftest: ok" if rc == 0 else "hardware selftest: FAILED")
     return rc

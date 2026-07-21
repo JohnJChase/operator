@@ -62,9 +62,9 @@ def test_crossbar_click_is_short_and_hot():
     pcm = build_crossbar_click(rate, seed=1)
     samples = array.array("h")
     samples.frombytes(pcm)
-    assert 0.20 * rate <= len(samples) <= 0.35 * rate
+    assert 0.25 * rate <= len(samples) <= 0.45 * rate
     peak = max(abs(s) for s in samples)
-    assert peak > int(_TONE_AMP * 32767 * 1.4)
+    assert peak > int(_TONE_AMP * 32767 * 2.0)
 
 
 def test_drain_hooks_before_pulses():
@@ -80,6 +80,67 @@ def test_drain_hooks_before_pulses():
     hooks, pulses = _drain_prioritized(q)
     assert hooks == [False, True]
     assert pulses == [1, 2]
+
+
+def test_notify_hangup_is_hardware_cutoff():
+    """Hangup marks on-hook and blocks new playback (even after TTS synthesize)."""
+    from unittest.mock import MagicMock, patch
+
+    from operator_os.audio import AudioConfig, AudioRouter
+
+    cfg = AudioConfig(
+        alsa_device="null",
+        sample_rate_hz=16000,
+        channels=1,
+        format="S16_LE",
+        piper_voice="hfc_female",
+        piper_volume=0.6,
+    )
+    audio = AudioRouter(cfg)
+    audio.set_hook(True)
+    assert audio.is_on_hook is False
+    audio.notify_hangup()
+    assert audio.is_on_hook is True
+    with patch("subprocess.Popen") as popen:
+        audio.play_tone(440, seconds=0.1, wait=False)
+        audio.play_file("/tmp/does-not-matter.wav", wait=False)
+        popen.assert_not_called()
+    audio.close()
+
+
+def test_wait_off_hook_returns_when_already_off():
+    from operator_os.config import load_profile
+    from operator_os.phone import SimulatorPhone, wait_off_hook
+
+    phone = SimulatorPhone(load_profile("config/hardware_profile.yaml"), off_hook=True)
+    assert wait_off_hook(phone, allow_enter=False) is True
+
+
+def test_attach_hook_cutoff_hangup_stops_audio():
+    from operator_os.audio import AudioConfig, AudioRouter
+    from operator_os.config import load_profile
+    from operator_os.phone import SimulatorPhone, attach_hook_cutoff
+
+    profile = load_profile("config/hardware_profile.yaml")
+    phone = SimulatorPhone(profile)
+    audio = AudioRouter(
+        AudioConfig(
+            alsa_device="null",
+            sample_rate_hz=16000,
+            channels=1,
+            format="S16_LE",
+            piper_voice="hfc_female",
+            piper_volume=0.6,
+        )
+    )
+    cancelled = []
+    attach_hook_cutoff(phone, audio, on_hangup=lambda: cancelled.append(1))
+    phone.set_hook(True)
+    assert audio.is_on_hook is False
+    phone.set_hook(False)
+    assert audio.is_on_hook is True
+    assert cancelled == [1]
+    audio.close()
 
 
 def test_stop_bumps_generation_and_aborts_sleep():

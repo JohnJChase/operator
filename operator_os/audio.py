@@ -49,6 +49,27 @@ def resolve_voice(name_or_path: str) -> Path:
     return path
 
 
+def resolve_stream_url(url: str, *, timeout: float = 8.0) -> str:
+    """Return a playable media URL; expand ``.pls`` playlists to File1."""
+    import urllib.request
+
+    u = (url or "").strip()
+    if not u:
+        raise ValueError("empty stream url")
+    lower = u.lower()
+    if not (lower.endswith(".pls") or ".pls?" in lower or "/pls" in lower):
+        return u
+    req = urllib.request.Request(u, headers={"User-Agent": "operator-os/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read().decode("utf-8", errors="replace")
+    for line in body.splitlines():
+        if line.lower().startswith("file1="):
+            media = line.split("=", 1)[1].strip()
+            if media:
+                return media
+    raise RuntimeError(f"no File1 in playlist: {u}")
+
+
 class AudioRouter:
     """Process-wide audio lock. No other module may call aplay/arecord/Piper."""
 
@@ -56,9 +77,13 @@ class AudioRouter:
         self.cfg = cfg
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[bytes] | None = None
+        self._helper_proc: subprocess.Popen[bytes] | None = None
+        self._capture_proc: subprocess.Popen[bytes] | None = None
         self._temps: list[Path] = []
         self._stream_stop = threading.Event()
         self._stream_thread: threading.Thread | None = None
+        self._capture_thread: threading.Thread | None = None
+        self._duplex = False
         self._stop_gen = 0  # bumped on every stop(); long ops abort if gen changes
         self._on_hook = True
         self.engine = "unloaded"
@@ -85,11 +110,17 @@ class AudioRouter:
         if self._on_hook:
             self.stop()
 
-    def notify_hangup(self) -> None:
-        """Hook interrupt: silence the receiver immediately (GPIO-thread safe).
+    @property
+    def is_on_hook(self) -> bool:
+        return self._on_hook
 
-        State transitions still run on the main loop; this only cuts audio.
+    def notify_hangup(self) -> None:
+        """Physical hangup = hardware cutoff. Mark on-hook and kill audio NOW.
+
+        Safe from the GPIO callback thread. State machines may still run later;
+        this alone must silence the receiver and block new playback.
         """
+        self._on_hook = True
         self.stop()
 
     def stop(self) -> None:
@@ -101,7 +132,9 @@ class AudioRouter:
         self.stop()
 
     def is_busy(self) -> bool:
-        """True while aplay (or tone stream) is still running."""
+        """True while aplay/arecord (or duplex) is still running."""
+        if self._duplex:
+            return True
         proc = self._proc
         return proc is not None and proc.poll() is None
 
@@ -126,6 +159,8 @@ class AudioRouter:
         fade_in_ms: int = 0,
     ) -> None:
         """Play a tone. Dial tone streams into aplay until stop(); no WAV prebuild."""
+        if self._on_hook:
+            return
         freqs = _tone_freqs(name_or_hz)
         key = str(name_or_hz).lower() if isinstance(name_or_hz, str) else ""
         # Continuous dial tone: stream forever until audio.stop().
@@ -134,23 +169,54 @@ class AudioRouter:
             return
         self._start_tone_stream(freqs, duration_s=seconds, wait=wait, fade_in_ms=fade_in_ms)
 
+    def play_plant(self, name: str, *, wait: bool = True) -> None:
+        """Play a named line-plant signature from a transition action.
+
+        Catalog (extend here when edges need distinct throws):
+          fx_seize   — patch onto a trunk / operator jack
+          fx_release — drop trunk, back to dial tone / listen
+          fx_outside — outside-line seize (digit 9)
+        """
+        key = str(name or "").strip().lower()
+        if key in ("fx_seize", "fx_release", "crossbar"):
+            self.play_crossbar_click(wait=wait)
+            return
+        if key == "fx_outside":
+            self.seize_outside_line()
+            return
+
+    def play_crossbar_click(self, *, wait: bool = True) -> None:
+        """Electromechanical switch throw into the handset receiver."""
+        if self._on_hook:
+            return
+        rate = self.cfg.sample_rate_hz
+        click = build_crossbar_click(rate)
+        duration = len(click) / (2.0 * rate)
+        if self._duplex:
+            self.write_duplex_playback(click, src_rate=rate)
+            if wait:
+                self._interruptible_sleep(duration + 0.05, self._stop_gen)
+            return
+        self._play_pcm_raw(click, rate, wait=wait)
+
     def seize_outside_line(self) -> None:
         """Electromechanical seize: click/thud → blind spot → external CO dial tone.
 
         See docs/crossbar-outside-line-effect.md. Abort immediately if hangup
         interrupts mid-sequence.
         """
+        if self._on_hook:
+            return
         self.stop()
         gen = self._stop_gen
-        if not self._interruptible_sleep(_SEIZE_POST_DIGIT_MS / 1000.0, gen):
+        if self._on_hook or not self._interruptible_sleep(_SEIZE_POST_DIGIT_MS / 1000.0, gen):
             return
-        click = build_crossbar_click(self.cfg.sample_rate_hz)
-        if self._stopped_since(gen):
-            return
-        self._play_pcm_raw(click, self.cfg.sample_rate_hz, wait=True)
-        if self._stopped_since(gen):
+        self.play_crossbar_click(wait=True)
+        if self._on_hook or self._stopped_since(gen):
             return
         if not self._interruptible_sleep(_SEIZE_BLIND_MS / 1000.0, gen):
+            return
+        if self._on_hook:
             return
         self._start_tone_stream(
             (350.0, 440.0),
@@ -166,7 +232,11 @@ class AudioRouter:
         wait: bool,
         fade_in_ms: int = 0,
     ) -> None:
+        if self._on_hook:
+            return
         with self._lock:
+            if self._on_hook:
+                return
             self._stop_locked()
             self._stream_stop.clear()
             rate = self.cfg.sample_rate_hz
@@ -220,7 +290,7 @@ class AudioRouter:
         if stdin is None:
             return
         try:
-            while not self._stream_stop.is_set():
+            while not self._stream_stop.is_set() and not self._on_hook:
                 if end_i is not None and sample_i >= end_i:
                     break
                 n = chunk
@@ -251,7 +321,11 @@ class AudioRouter:
 
     def _play_pcm_raw(self, pcm: bytes, rate: int, wait: bool = True) -> None:
         """Play mono S16_LE raw PCM once through aplay."""
+        if self._on_hook:
+            return
         with self._lock:
+            if self._on_hook:
+                return
             self._stop_locked()
             self._proc = subprocess.Popen(
                 [
@@ -283,7 +357,15 @@ class AudioRouter:
                 self._proc = None
 
     def play_file(self, path: Path | str, wait: bool = True, *, ephemeral: bool = False) -> None:
+        if self._on_hook:
+            if ephemeral:
+                Path(path).unlink(missing_ok=True)
+            return
         with self._lock:
+            if self._on_hook:
+                if ephemeral:
+                    Path(path).unlink(missing_ok=True)
+                return
             self._stop_locked()
             p = Path(path)
             if ephemeral:
@@ -298,12 +380,85 @@ class AudioRouter:
                 self._proc = None
                 self._clear_temps()
 
+    def play_stream(self, url: str, *, wait: bool = False) -> None:
+        """Seize a live HTTP(S) audio stream into the handset (ffmpeg → aplay).
+
+        Accepts a direct media URL or a Shoutcast/Icecast ``.pls`` playlist.
+        Runs until hangup/stop, or until the remote end closes.
+        """
+        if self._on_hook:
+            return
+        media = resolve_stream_url(url)
+        rate = self.cfg.sample_rate_hz
+        with self._lock:
+            if self._on_hook:
+                return
+            self._stop_locked()
+            ff = subprocess.Popen(
+                [
+                    "ffmpeg",
+                    "-nostdin",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    media,
+                    "-f",
+                    "s16le",
+                    "-acodec",
+                    "pcm_s16le",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    str(rate),
+                    "-",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            assert ff.stdout is not None
+            ap = subprocess.Popen(
+                [
+                    "aplay",
+                    "-q",
+                    "-D",
+                    self.cfg.alsa_device,
+                    "-f",
+                    "S16_LE",
+                    "-c",
+                    "1",
+                    "-r",
+                    str(rate),
+                    "-t",
+                    "raw",
+                ],
+                stdin=ff.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            ff.stdout.close()
+            self._helper_proc = ff
+            self._proc = ap
+        if wait:
+            proc = self._proc
+            if proc is not None:
+                proc.wait()
+                with self._lock:
+                    if self._proc is proc:
+                        self._proc = None
+                        self._helper_proc = None
+
     def speak(self, text: str, *, wait: bool = True) -> None:
+        if self._on_hook:
+            return
         text = text.strip()
         if not text:
             return
         wav = self.synthesize(text)
         if wav is None:
+            return
+        if self._on_hook:
+            wav.unlink(missing_ok=True)
             return
         self.play_file(wav, wait=wait, ephemeral=True)
 
@@ -346,6 +501,135 @@ class AudioRouter:
         finally:
             if raw.resolve() != dest.resolve():
                 raw.unlink(missing_ok=True)
+
+    def start_duplex(self, on_capture: object) -> None:
+        """Start handset capture + playback for Realtime. on_capture(pcm_s16_handset_rate)."""
+        if self._on_hook:
+            raise RuntimeError("duplex disabled while on-hook")
+        rate = self.cfg.sample_rate_hz
+        # ~100ms chunks at handset rate
+        chunk = max(2, int(rate * 0.1) * 2)
+
+        def _reader(proc: subprocess.Popen[bytes], gen: int) -> None:
+            assert proc.stdout is not None
+            try:
+                while not self._stream_stop.is_set() and not self._stopped_since(gen) and not self._on_hook:
+                    data = proc.stdout.read(chunk)
+                    if not data:
+                        break
+                    try:
+                        on_capture(data)  # type: ignore[operator]
+                    except Exception:
+                        break
+            finally:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+        with self._lock:
+            self._stop_locked()
+            self._stream_stop.clear()
+            gen = self._stop_gen
+            self._duplex = True
+            self._capture_proc = subprocess.Popen(
+                [
+                    "arecord",
+                    "-q",
+                    "-D",
+                    self.cfg.alsa_device,
+                    "-f",
+                    "S16_LE",
+                    "-c",
+                    "1",
+                    "-r",
+                    str(rate),
+                    "-t",
+                    "raw",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            self._proc = subprocess.Popen(
+                [
+                    "aplay",
+                    "-q",
+                    "-D",
+                    self.cfg.alsa_device,
+                    "-f",
+                    "S16_LE",
+                    "-c",
+                    "1",
+                    "-r",
+                    str(rate),
+                    "-t",
+                    "raw",
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._capture_thread = threading.Thread(
+                target=_reader,
+                args=(self._capture_proc, gen),
+                daemon=True,
+                name="duplex-capture",
+            )
+            self._capture_thread.start()
+
+    def write_duplex_playback(self, pcm_s16: bytes, *, src_rate: int) -> None:
+        """Write PCM into the duplex aplay stdin (resampled to handset rate)."""
+        if self._on_hook or not pcm_s16 or not self._duplex:
+            return
+        rate = self.cfg.sample_rate_hz
+        pcm = pcm_s16 if src_rate == rate else resample_s16_mono(pcm_s16, src_rate, rate)
+        with self._lock:
+            if self._on_hook:
+                return
+            proc = self._proc
+            if proc is None or proc.stdin is None or proc.poll() is not None:
+                return
+            try:
+                proc.stdin.write(pcm)
+                proc.stdin.flush()
+            except BrokenPipeError:
+                pass
+
+    def reset_duplex_playback(self) -> None:
+        """Drop in-flight model audio (barge-in): restart aplay, keep arecord."""
+        if not self._duplex:
+            return
+        rate = self.cfg.sample_rate_hz
+        with self._lock:
+            old = self._proc
+            self._proc = None
+            if old is not None:
+                if old.poll() is None:
+                    old.kill()
+                if old.stdin is not None:
+                    try:
+                        old.stdin.close()
+                    except Exception:
+                        pass
+            self._proc = subprocess.Popen(
+                [
+                    "aplay",
+                    "-q",
+                    "-D",
+                    self.cfg.alsa_device,
+                    "-f",
+                    "S16_LE",
+                    "-c",
+                    "1",
+                    "-r",
+                    str(rate),
+                    "-t",
+                    "raw",
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
     def record(self, seconds: float, output_path: Path | str) -> Path:
         """Record from the handset mic. Interruptible via stop()/hangup."""
@@ -396,11 +680,10 @@ class AudioRouter:
 
     def _stop_locked(self) -> None:
         self._stream_stop.set()
-        proc = self._proc
-        self._proc = None
-        self._stream_thread = None
-        if proc is not None:
-            # Kill first — closing a full stdin pipe can block for hundreds of ms.
+        self._duplex = False
+        for proc in (self._proc, self._helper_proc, self._capture_proc):
+            if proc is None:
+                continue
             if proc.poll() is None:
                 proc.kill()
             if proc.stdin is not None:
@@ -412,6 +695,11 @@ class AudioRouter:
                 proc.wait(timeout=0.05)
             except subprocess.TimeoutExpired:
                 pass
+        self._proc = None
+        self._helper_proc = None
+        self._capture_proc = None
+        self._stream_thread = None
+        self._capture_thread = None
         self._clear_temps()
 
     def _clear_temps(self) -> None:
@@ -511,37 +799,66 @@ def _tone_freqs(name_or_hz: str | float | tuple[float, ...]) -> tuple[float, ...
 
 
 def build_crossbar_click(rate: int, *, seed: int = 1) -> bytes:
-    """Synthesize relay pop + spring snap + solenoid thud (mono S16_LE).
+    """Synthesize a mechanical switch throw (mono S16_LE).
 
-    Peaks ~3–6 dB above dial-tone amplitude (_TONE_AMP=0.15).
-    Leading silence covers USB/ALSA open latency so the transient is not eaten.
+    Two-stage crossbar feel: armature pull-in, then contact slap + metallic
+    ring. Peaks well above dial-tone amplitude (_TONE_AMP=0.15). Leading
+    silence covers USB/ALSA open latency so the transient is not eaten.
     """
     rng = random.Random(seed)
-    lead = int(rate * 0.100)  # 100 ms pad — ATR2x open latency
-    body = int(rate * 0.120)  # audible transient body
-    tail = int(rate * 0.040)
-    n = lead + body + tail
+    lead = int(rate * 0.080)
+    # Stage gap: soft clunk, then hard contacts ~28 ms later.
+    gap = int(rate * 0.028)
+    body = int(rate * 0.160)
+    tail = int(rate * 0.050)
+    n = lead + gap + body + tail
     mix = [0.0] * n
-    base = lead
 
-    # 1) DC spark / pop — ~2 ms square spike (bright tick).
-    pop_n = max(1, int(rate * 0.002))
-    for i in range(pop_n):
-        mix[base + i] += 0.55 if (i % 2 == 0) else -0.55
+    def _add_noise(start: int, dur_s: float, amp: float, tau_s: float) -> None:
+        dur = int(rate * dur_s)
+        tau = max(1.0, rate * tau_s)
+        for i in range(dur):
+            idx = start + i
+            if idx >= n:
+                break
+            env = math.exp(-i / tau)
+            mix[idx] += (rng.random() * 2.0 - 1.0) * amp * env
 
-    # 2) Spring snap — ~25 ms noise, fast exponential decay.
-    noise_n = int(rate * 0.025)
-    tau_noise = rate * 0.006
-    for i in range(noise_n):
-        env = math.exp(-i / tau_noise)
-        mix[base + i] += (rng.random() * 2.0 - 1.0) * 0.40 * env
+    def _add_sine(start: int, dur_s: float, hz: float, amp: float, tau_s: float) -> None:
+        dur = int(rate * dur_s)
+        tau = max(1.0, rate * tau_s)
+        for i in range(dur):
+            idx = start + i
+            if idx >= n:
+                break
+            env = math.exp(-i / tau)
+            mix[idx] += math.sin(2 * math.pi * hz * i / rate) * amp * env
 
-    # 3) Solenoid slap — ~120 Hz, ~90 ms — this is what the receiver hears as "thunk".
-    thud_n = int(rate * 0.090)
-    tau_thud = rate * 0.028
-    for i in range(thud_n):
-        env = math.exp(-i / tau_thud)
-        mix[base + i] += math.sin(2 * math.pi * 120.0 * i / rate) * 0.50 * env
+    def _add_pop(start: int, dur_s: float, amp: float) -> None:
+        dur = max(1, int(rate * dur_s))
+        for i in range(dur):
+            idx = start + i
+            if idx >= n:
+                break
+            mix[idx] += amp if (i % 2 == 0) else -amp
+
+    # --- Stage 1: armature starts moving (dull cabinet thud) ---
+    a0 = lead
+    _add_sine(a0, 0.055, 95.0, 0.42, 0.022)
+    _add_sine(a0, 0.040, 55.0, 0.28, 0.018)
+    _add_noise(a0, 0.020, 0.22, 0.008)
+
+    # --- Stage 2: contacts slam (the satisfying switch) ---
+    c0 = lead + gap
+    _add_pop(c0, 0.0015, 0.85)  # micro-arc / contact make
+    _add_noise(c0, 0.018, 0.70, 0.004)  # spring / blade snap
+    _add_sine(c0, 0.070, 140.0, 0.55, 0.020)  # solenoid body
+    _add_sine(c0, 0.045, 1100.0, 0.28, 0.010)  # metal ring
+    _add_sine(c0, 0.035, 2400.0, 0.16, 0.006)  # bright edge
+    # Contact bounce — tiny second make ~12 ms later.
+    b0 = c0 + int(rate * 0.012)
+    _add_pop(b0, 0.0010, 0.45)
+    _add_noise(b0, 0.010, 0.30, 0.003)
 
     out = array.array("h")
     for v in mix:
