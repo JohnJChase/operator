@@ -52,6 +52,9 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--text", default="This is the operator.")
     sub.add_parser("crossbar-test", help="play outside-line seize click + dial tone")
     sub.add_parser("status", help="print profile and current state summary")
+    ref = sub.add_parser("refresh", help="fetch and cache news/weather")
+    ref.add_argument("--weather", action="store_true", help="refresh weather only")
+    ref.add_argument("--news", action="store_true", help="refresh news only")
 
     args = parser.parse_args(argv)
     profile = load_profile(args.config)
@@ -77,6 +80,13 @@ def main(argv: list[str] | None = None) -> None:
         from operator_os.diagnostics import crossbar_test
 
         raise SystemExit(crossbar_test(profile))
+    if args.cmd == "refresh":
+        from operator_os.refresh import refresh_all
+
+        both = not args.weather and not args.news
+        raise SystemExit(
+            refresh_all(profile, weather=both or args.weather, news=both or args.news)
+        )
     if args.cmd == "status":
         print(f"profile={profile.name}")
         print(f"hook={profile.gpio.hook_bcm} dial={profile.gpio.dial_pulse_bcm} "

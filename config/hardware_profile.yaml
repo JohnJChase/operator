@@ -151,8 +151,8 @@ providers:
     provider: Open-Meteo
     endpoint: "https://api.open-meteo.com/v1/forecast"
     location_label: "Fairfax, Virginia area"
-    latitude: null
-    longitude: null
+    latitude: 38.8462
+    longitude: -77.3064
 
 timing:
   hook_flash_min_ms: 100

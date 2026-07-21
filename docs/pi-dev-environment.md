@@ -49,10 +49,14 @@ just test-hardware
 just simulate
 just run
 just status
+just refresh            # weather + news (needs NEWSDATA_API_KEY for news)
+just refresh --weather
+just refresh --news
 just trace-hook
 just trace-dial
 just ring-test          # just ring-test 2
 just audio-test         # just audio-test 440 2
 just mic-test           # just mic-test 5
 just speak-test         # just speak-test "Operator."
+just crossbar-test
 ```

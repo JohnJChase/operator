@@ -61,6 +61,9 @@ speak-test text="This is the operator.":
 crossbar-test:
     uv run operator-os crossbar-test
 
+refresh *args:
+    uv run operator-os refresh {{args}}
+
 lint:
     uv run ruff check .
 
