@@ -1,0 +1,342 @@
+project: WE302 Operator
+revision: Rev A as-built
+date: 2026-07-18
+status: bench_verified
+
+notes:
+  - "This netlist describes the working bypass/interface board."
+  - "The original 302 network is not the Rev A signal center."
+  - "Hook and dial are direct GPIO inputs with series resistors."
+  - "Ring cutoff is software controlled; no hardware off-hook interlock is populated."
+  - "Black Magic high-voltage output must remain isolated from board ground."
+  - "The Arduino is not part of Rev A; any Arduino-style board was only a temporary screw-terminal landing pad."
+  - "Permanent perfboard should include the phone screw terminals on the same board as the interface circuit."
+  - "Audio is direct handset wiring with passive analog hardware sidetone; optional software sidetone may supplement it in the application audio router."
+  - "C_MIC_REC is the mic recording/gain coupling capacitor from BLACK_MIC to ATR2X mic tip."
+
+mechanical:
+  phone_harness:
+    cable: "8-conductor thermostat wire"
+    recommendation: "strain-relieve cable before terminal block"
+    conductors:
+      - signal: Y
+        role: "control/audio common to board GND"
+      - signal: BK
+        role: "hook input"
+      - signal: BB
+        role: "dial pulse input"
+      - signal: L1
+        role: "ring HV side A"
+      - signal: K
+        role: "ring HV side B"
+      - signal: WHITE_RX
+        role: "receiver signal"
+      - signal: RED_R_COMMON
+        role: "handset common"
+      - signal: BLACK_MIC
+        role: "carbon mic signal/bias"
+  terminal_blocks:
+    permanent_board: true
+    note: "Move the separated screw terminals onto the same perfboard for the permanent build."
+  arduino:
+    included_in_build: false
+    note: "Not an electrical component in the project."
+
+phone_modifications:
+  - id: lift_hook_from_gn
+    action: disconnect
+    from: hook_line
+    original_terminal: GN
+  - id: lift_dial_from_l1
+    action: disconnect
+    from: dial_line
+    original_terminal: L1
+  - id: join_lifted_control_lines
+    action: jumper
+    nodes:
+      - lifted_hook_line
+      - lifted_dial_line
+    location: isolated_off_terminal_splice
+  - id: network_bypass
+    action: keep_original_network_out_of_rev_a_control_audio_paths
+
+pi_pin_map:
+  hook_input:
+    bcm: 17
+    physical: 11
+    net: NET_GPIO17_HOOK_PI_SIDE
+    logic: "on-hook HIGH, off-hook LOW"
+  dial_pulse_input:
+    bcm: 10
+    physical: 19
+    net: NET_GPIO10_PULSE_PI_SIDE
+    logic: "open at rest; pulse closure to GND; count gpiozero when_pressed"
+  ring_output:
+    bcm: 23
+    physical: 16
+    net: NET_RING_CMD
+    logic: "HIGH energizes relay"
+  board_power_5v:
+    physical_options: [2, 4]
+    net: NET_BOARD_5V
+  board_ground:
+    physical_example: 6
+    net: NET_BOARD_GND
+components:
+  - ref: PI
+    type: Raspberry Pi 5
+  - ref: ATR2X
+    type: ATR2x USB audio interface
+  - ref: Q1
+    type: NPN transistor
+    value: "PN2222A / 2N2222"
+    role: relay_low_side_driver
+    pinout_warning: "Verify exact E/B/C pinout before soldering."
+  - ref: K1
+    type: relay
+    value: Axicom V23105-A5001-A201
+    role: switches_black_magic_low_voltage_input
+    contacts_used: "one NO pole"
+  - ref: D1
+    type: diode
+    value: "1N4148 or 1N400x"
+    role: relay_flyback
+    orientation: "cathode/stripe to NET_BOARD_5V; anode to NET_RELAY_LOW"
+  - ref: R_HOOK
+    type: resistor
+    value: 1k
+    role: GPIO17_series_protection
+  - ref: R_PULSE
+    type: resistor
+    value: 1k
+    role: GPIO10_series_protection
+  - ref: R_Q1_BASE
+    type: resistor
+    value: 1k
+    role: relay_driver_base_limit
+  - ref: R_HP_SERIES
+    type: resistor
+    value: "220 ohm"
+    role: receiver_headphone_series_resistor
+  - ref: R_MIC_MIN
+    type: resistor
+    value: "220 ohm"
+    role: carbon_mic_drive_minimum_resistance
+  - ref: RV_MIC_DRIVE
+    type: potentiometer
+    value: 10k
+    role: carbon_mic_drive_trim
+    wiring: "rheostat: one outer lug from R_MIC_MIN, wiper tied to other outer lug and NET_MIC_BIASED_BLACK"
+  - ref: C_MIC_REC
+    type: capacitor
+    value: "existing bench-installed value; 1uF to 10uF typical"
+    role: carbon_mic_recording_gain_ac_coupling
+    polarity: "if electrolytic: + to NET_MIC_BIASED_BLACK, - to ATR2X mic tip"
+  - ref: C_SIDE
+    type: capacitor
+    value: 470uF
+    role: passive_sidetone_ac_coupling
+    polarity: "+/long leg to NET_MIC_BIASED_BLACK; -/short leg to sidetone pot"
+  - ref: RV_SIDE
+    type: potentiometer
+    value: 1k
+    role: sidetone_level_trim
+    wiring: "rheostat: one outer lug from C_SIDE negative side, wiper tied to other outer lug and R_SIDE_MIN"
+  - ref: R_SIDE_MIN
+    type: resistor
+    value: "10 ohm"
+    role: sidetone_minimum_series_resistance
+  - ref: C_DECOUPLE_SMALL
+    type: capacitor
+    value: 0.1uF
+    role: supply_decoupling
+    optional: true
+  - ref: C_DECOUPLE_BULK
+    type: capacitor
+    value: 470uF
+    role: supply_bulk_decoupling
+    optional: true
+  - ref: BM1
+    type: Black Magic ring generator
+  - ref: PHONE
+    type: Western Electric 302
+
+nets:
+  NET_BOARD_5V:
+    description: "Pi-powered +5V board rail"
+    connections:
+      - "PI physical pin 2 or 4"
+      - "K1 relay coil +"
+      - "K1 relay COM"
+      - "R_MIC_MIN high side"
+      - "C_DECOUPLE_SMALL +"
+      - "C_DECOUPLE_BULK +"
+
+  NET_BOARD_GND:
+    description: "Common Rev A low-voltage ground"
+    connections:
+      - "PI GND"
+      - "PHONE Y control common"
+      - "PHONE red/R handset common"
+      - "Q1 emitter"
+      - "BM1 low-voltage GND input"
+      - "ATR2X headphone sleeve"
+      - "ATR2X mic sleeve"
+      - "C_DECOUPLE_SMALL -"
+      - "C_DECOUPLE_BULK -"
+
+  NET_GPIO17_HOOK_PI_SIDE:
+    description: "Pi side of hook input protection resistor"
+    connections:
+      - "PI GPIO17 physical pin 11"
+      - "R_HOOK pin 1"
+
+  NET_HOOK_BK:
+    description: "Hook switch signal"
+    connections:
+      - "R_HOOK pin 2"
+      - "PHONE BK"
+    logic: "HIGH on-hook through Pi pull-up; LOW off-hook when BK closes to Y/GND"
+
+  NET_GPIO10_PULSE_PI_SIDE:
+    description: "Pi side of pulse input protection resistor"
+    connections:
+      - "PI GPIO10 physical pin 19"
+      - "R_PULSE pin 1"
+
+  NET_PULSE_BB:
+    description: "Dial pulse signal"
+    connections:
+      - "R_PULSE pin 2"
+      - "PHONE BB"
+    logic: "HIGH at rest through Pi pull-up; LOW / gpiozero pressed when BB closes to Y/GND"
+
+  NET_RING_CMD:
+    description: "Pi ring relay command"
+    connections:
+      - "PI GPIO23 physical pin 16"
+      - "R_Q1_BASE pin 1"
+    logic: "HIGH requests ring"
+
+  NET_Q1_BASE:
+    description: "Relay driver transistor base"
+    connections:
+      - "R_Q1_BASE pin 2"
+      - "Q1 base"
+
+  NET_RELAY_LOW:
+    description: "Relay coil low side switched by Q1"
+    connections:
+      - "K1 relay coil -"
+      - "Q1 collector"
+      - "D1 anode"
+
+  NET_RELAY_COIL_PLUS:
+    alias_of: NET_BOARD_5V
+    connections:
+      - "D1 cathode/stripe"
+
+  NET_BM_5V_SWITCHED:
+    description: "Relay-switched Black Magic +5V input"
+    connections:
+      - "K1 relay NO"
+      - "BM1 low-voltage +5V input"
+
+  NET_RING_HV_A:
+    description: "High-voltage ringing output A"
+    connections:
+      - "BM1 HV OUT1"
+      - "PHONE L1"
+    isolation: "must not connect to board ground or GPIO"
+
+  NET_RING_HV_B:
+    description: "High-voltage ringing output B"
+    connections:
+      - "BM1 HV OUT2"
+      - "PHONE K"
+    isolation: "must not connect to board ground or GPIO"
+
+  NET_ATR_HP_TIP:
+    description: "ATR2x headphone output before receiver series resistor"
+    connections:
+      - "ATR2X headphone tip"
+      - "R_HP_SERIES pin 1"
+
+  NET_WHITE_RX:
+    description: "Receiver signal and passive sidetone summing node"
+    connections:
+      - "R_HP_SERIES pin 2"
+      - "R_SIDE_MIN output"
+      - "PHONE WHITE_RX / white receiver wire"
+
+  NET_AUDIO_COMMON:
+    alias_of: NET_BOARD_GND
+    connections:
+      - "ATR2X headphone sleeve"
+      - "PHONE red/R handset common"
+
+  NET_MIC_DRIVE_INPUT:
+    description: "Mic-drive trim input after minimum resistor"
+    connections:
+      - "R_MIC_MIN low side"
+      - "RV_MIC_DRIVE outer lug A"
+
+  NET_MIC_BIASED_BLACK:
+    description: "Carbon mic biased signal node"
+    connections:
+      - "RV_MIC_DRIVE wiper"
+      - "RV_MIC_DRIVE outer lug B tied to wiper"
+      - "PHONE BLACK_MIC / black mic wire"
+      - "C_MIC_REC positive/input side"
+      - "C_SIDE positive/long-leg side"
+
+  NET_ATR_MIC_TIP:
+    description: "Mic signal into ATR2x after recording/gain coupling capacitor"
+    connections:
+      - "C_MIC_REC negative/output side"
+      - "ATR2X mic tip"
+
+  NET_SIDETONE_AC:
+    description: "AC-coupled sidetone signal after 470uF capacitor"
+    connections:
+      - "C_SIDE negative/short-leg side"
+      - "RV_SIDE outer lug A"
+
+  NET_SIDETONE_TRIM_OUT:
+    description: "Sidetone trim wiper before 10 ohm minimum resistor"
+    connections:
+      - "RV_SIDE wiper"
+      - "RV_SIDE outer lug B tied to wiper"
+      - "R_SIDE_MIN input"
+
+truth_table:
+  hook:
+    on_hook:
+      BK_to_Y: open
+      GPIO17: HIGH
+    off_hook:
+      BK_to_Y: closed
+      GPIO17: LOW
+  dial_pulse:
+    rest: HIGH
+    pulse: LOW
+    event: "gpiozero Button.when_pressed"
+  ring:
+    GPIO23_LOW: "relay off; Black Magic unpowered"
+    GPIO23_HIGH: "relay on; Black Magic powered; bell rings if connected"
+
+software_requirements:
+  - "Use internal pull-up on GPIO17."
+  - "Treat GPIO17 LOW as off-hook."
+  - "Use Pi pull-up on GPIO10 and count Button.when_pressed closure events."
+  - "Turn GPIO23 LOW immediately when GPIO17 reports off-hook during ringing."
+  - "Rev A hardware sidetone is passive analog; optional software sidetone must be owned by the application audio router."
+
+safety_rules:
+  - "No GPIO input may see 5V."
+  - "Black Magic HV outputs connect only to L1 and K."
+  - "Black Magic HV outputs must never connect to board GND."
+  - "Relay must switch Black Magic low-voltage input power, not HV output."
+  - "Use relay NO contact so default/failure state is no ring."
+  - "ATR2X headphone tip must reach WHITE_RX only through R_HP_SERIES 220 ohm."
+  - "C_SIDE polarity must be positive to BLACK_MIC and negative to RV_SIDE."

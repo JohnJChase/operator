@@ -1,0 +1,71 @@
+flowchart LR
+    subgraph PI["Raspberry Pi 5 + ATR2x"]
+        PI5["5V header pin 2/4"]
+        PIGND["GND header pin"]
+        GPIO17["GPIO17 pin 11 hook input"]
+        GPIO10["GPIO10 pin 19 pulse input"]
+        GPIO23["GPIO23 pin 16 ring output"]
+        HPTIP["ATR2x headphone tip"]
+        HPSLEEVE["ATR2x headphone sleeve"]
+        MICTIP["ATR2x mic tip"]
+        MICSLEEVE["ATR2x mic sleeve"]
+    end
+
+    subgraph BOARD["Rev A Interface Board"]
+        RHOOK["1k hook series resistor"]
+        RPULSE["1k pulse series resistor"]
+        RBASE["1k Q1 base resistor"]
+        Q1["Q1 NPN relay driver"]
+        RELAYCOIL["Axicom relay coil"]
+        D1["flyback diode"]
+        RELAYNO["relay NO contact"]
+        HPSERIES["220 ohm headphone series resistor"]
+        MICMIN["220 ohm mic-drive minimum resistor"]
+        RVMIC["10k mic-drive pot as rheostat"]
+        CMIC["mic recording/gain coupling cap"]
+        CSIDE["470uF sidetone cap"]
+        RVSIDE["1k sidetone pot as rheostat"]
+        RSIDE["10 ohm sidetone minimum resistor"]
+        DECOUPLE["0.1uF + 470uF supply decoupling"]
+    end
+
+    subgraph BM["Black Magic Ring Generator"]
+        BMLVPLUS["+5V input"]
+        BMLVGND["GND input"]
+        BMHVA["HV OUT1"]
+        BMHVB["HV OUT2"]
+    end
+
+    subgraph PHONE["Western Electric 302 Bypassed Parts"]
+        Y["Y common"]
+        BK["BK hook"]
+        BB["BB pulse"]
+        L1["L1 bell side"]
+        K["K bell side"]
+        WHITE["white receiver wire"]
+        REDR["red/R handset common"]
+        BLACK["black carbon mic wire"]
+    end
+
+    PI5 --> DECOUPLE
+    PI5 --> RELAYCOIL
+    PIGND --> Q1
+    PIGND --> Y
+    PIGND --> REDR
+    PIGND --> BMLVGND
+
+    GPIO17 --> RHOOK --> BK
+    GPIO10 --> RPULSE --> BB
+    GPIO23 --> RBASE --> Q1 --> RELAYCOIL
+    D1 --- RELAYCOIL
+
+    PI5 --> RELAYNO --> BMLVPLUS
+    BMHVA --> L1
+    BMHVB --> K
+
+    HPTIP --> HPSERIES --> WHITE
+    HPSLEEVE --> REDR
+
+    PI5 --> MICMIN --> RVMIC --> BLACK --> CMIC --> MICTIP
+    BLACK --> CSIDE --> RVSIDE --> RSIDE --> WHITE
+    MICSLEEVE --> REDR

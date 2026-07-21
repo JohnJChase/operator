@@ -1,0 +1,101 @@
+digraph RevABoard {
+  graph [
+    rankdir=LR,
+    label="WE302 Operator Rev A As-Built Board",
+    labelloc=t,
+    fontsize=20
+  ];
+
+  node [shape=box, fontsize=11];
+  edge [fontsize=10];
+
+  subgraph cluster_pi {
+    label="Raspberry Pi 5 + ATR2x";
+    style=rounded;
+    color="#2f6fbb";
+    pi5 [label="Pi 5V\npin 2/4"];
+    pignd [label="Pi GND"];
+    gpio17 [label="GPIO17\npin 11\nhook"];
+    gpio10 [label="GPIO10\npin 19\npulse"];
+    gpio23 [label="GPIO23\npin 16\nring"];
+    hp_tip [label="ATR2x\nheadphone tip"];
+    hp_sleeve [label="ATR2x\nheadphone sleeve"];
+    mic_tip [label="ATR2x\nmic tip"];
+    mic_sleeve [label="ATR2x\nmic sleeve"];
+  }
+
+  subgraph cluster_board {
+    label="Rev A Interface Board";
+    style=rounded;
+    color="#4f8f45";
+    board5 [label="+5V rail"];
+    boardg [label="GND rail"];
+    r_hook [label="R_HOOK\n1k"];
+    r_pulse [label="R_PULSE\n1k"];
+    r_base [label="R_Q1_BASE\n1k"];
+    q1 [label="Q1 NPN\nrelay driver"];
+    coil [label="Axicom\nrelay coil"];
+    diode [label="D1 flyback\nstripe to +5V"];
+    contact [label="Relay NO\ncontact"];
+    r_hp [label="R_HP_SERIES\n220 ohm"];
+    r_mic_min [label="R_MIC_MIN\n220 ohm"];
+    rv_mic [label="RV_MIC_DRIVE\n10k rheostat"];
+    c_mic [label="C_MIC_REC\nmic recording/gain\ncoupling cap"];
+    c_side [label="C_SIDE\n470uF\n+ to BLACK_MIC"];
+    rv_side [label="RV_SIDE\n1k rheostat"];
+    r_side [label="R_SIDE_MIN\n10 ohm"];
+    dec [label="0.1uF + 470uF\ndecoupling"];
+  }
+
+  subgraph cluster_bm {
+    label="Black Magic Ring Generator";
+    style=rounded;
+    color="#b94b4b";
+    bm_plus [label="+5V input"];
+    bm_gnd [label="GND input"];
+    bm_out1 [label="HV OUT1"];
+    bm_out2 [label="HV OUT2"];
+  }
+
+  subgraph cluster_phone {
+    label="Western Electric 302 Bypassed Parts";
+    style=rounded;
+    color="#8661b5";
+    y [label="Y\ncommon"];
+    bk [label="BK\nhook"];
+    bb [label="BB\npulse"];
+    l1 [label="L1\nbell"];
+    k [label="K\nbell"];
+    white [label="white\nreceiver"];
+    redr [label="red/R\ncommon"];
+    black [label="black\ncarbon mic"];
+  }
+
+  pi5 -> board5;
+  pignd -> boardg;
+
+  gpio17 -> r_hook -> bk [label="hook input"];
+  gpio10 -> r_pulse -> bb [label="closure to GND pulse"];
+
+  gpio23 -> r_base -> q1 [label="ring command"];
+  board5 -> coil;
+  coil -> q1 [label="low-side switch"];
+  q1 -> boardg;
+  diode -> coil [label="across coil"];
+
+  board5 -> contact -> bm_plus [label="switched +5V"];
+  boardg -> bm_gnd;
+  bm_out1 -> l1 [color="#b91c1c", label="isolated HV"];
+  bm_out2 -> k [color="#b91c1c", label="isolated HV"];
+
+  boardg -> y;
+  boardg -> redr;
+
+  hp_tip -> r_hp -> white [label="receiver signal"];
+  hp_sleeve -> redr [label="audio common"];
+
+  board5 -> r_mic_min -> rv_mic -> black [label="mic drive"];
+  black -> c_mic -> mic_tip [label="AC coupled mic"];
+  black -> c_side -> rv_side -> r_side -> white [label="passive sidetone"];
+  mic_sleeve -> boardg;
+}

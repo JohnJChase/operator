@@ -1,0 +1,51 @@
+# Python environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local secrets and machine-specific config
+.env
+.env.*
+!.env.example
+config/*.local.yaml
+config/production.yaml
+
+# Runtime state
+*.log
+logs/
+var/
+data/*
+!data/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+
+# Private/generated audio and service caches
+recordings/
+captures/
+generated_audio/
+audio_cache/
+news.mp3
+news.json
+
+# Local reference dumps and generated heavy renders
+tmp/
+*.jpg
+*.JPG
+*.jpeg
+*.png
+*.pdf
+302-5302-wiring-diagram_thumb
+PROJECT_OVERVIEW.md
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
