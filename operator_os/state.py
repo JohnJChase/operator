@@ -17,6 +17,8 @@ class State(str, Enum):
     DIAL_TONE = "DIAL_TONE"
     COLLECTING_DIGIT = "COLLECTING_DIGIT"
     PLAYING_SERVICE = "PLAYING_SERVICE"
+    OUTSIDE_LINE = "OUTSIDE_LINE"  # seized trunk; collecting destination digits
+    SIP_CALL = "SIP_CALL"  # live Telnyx call
     DIAGNOSTIC = "DIAGNOSTIC"
     ERROR = "ERROR"
 
@@ -53,7 +55,7 @@ class PhoneController:
 
 
 def _service_actions(digit: Any, *, stop_audio: bool) -> tuple[str, ...]:
-    """Plant FX + play_service (or outside seize) for a committed digit."""
+    """Plant FX + play_service for a committed office digit (not outside collect)."""
     prefix: tuple[str, ...] = ("audio_stop",) if stop_audio else ()
     if digit == 9:
         return prefix + ("fx_outside",)
@@ -65,11 +67,8 @@ def _transition(state: State, event: Event) -> Transition:
 
     # Hangup / on-hook wins from every state.
     if et in ("on_hook", "hangup"):
-        return Transition(
-            State.ON_HOOK_IDLE,
-            actions=("audio_stop", "ring_stop"),
-            reason="hangup",
-        )
+        actions: tuple[str, ...] = ("audio_stop", "ring_stop", "sip_hangup")
+        return Transition(State.ON_HOOK_IDLE, actions=actions, reason="hangup")
 
     if state == State.ON_HOOK_IDLE:
         if et == "off_hook":
@@ -91,6 +90,12 @@ def _transition(state: State, event: Event) -> Transition:
 
     if state == State.DIAL_TONE:
         if et == "digit":
+            if event.value == 9:
+                return Transition(
+                    State.OUTSIDE_LINE,
+                    actions=("audio_stop", "fx_outside"),
+                    reason="digit_9",
+                )
             return Transition(
                 State.PLAYING_SERVICE,
                 actions=_service_actions(event.value, stop_audio=True),
@@ -106,10 +111,46 @@ def _transition(state: State, event: Event) -> Transition:
 
     if state == State.COLLECTING_DIGIT:
         if et == "digit":
+            if event.value == 9:
+                return Transition(
+                    State.OUTSIDE_LINE,
+                    actions=("fx_outside",),
+                    reason="digit_9",
+                )
             return Transition(
                 State.PLAYING_SERVICE,
                 actions=_service_actions(event.value, stop_audio=False),
                 reason=f"digit_{event.value}",
+            )
+        return Transition(state)
+
+    if state == State.OUTSIDE_LINE:
+        # Destination digits are collected by the main loop; FSM only leaves on
+        # place_call / cancel / hangup.
+        if et == "place_call":
+            return Transition(
+                State.SIP_CALL,
+                actions=("audio_stop", "sip_dial"),
+                reason="place_call",
+            )
+        if et == "outside_cancel":
+            return Transition(
+                State.DIAL_TONE,
+                actions=("audio_stop", "fx_release", "dial_tone"),
+                reason="outside_cancel",
+            )
+        if et == "pulse":
+            return Transition(state, reason="outside_pulse")
+        if et == "digit":
+            return Transition(state, reason="outside_digit")
+        return Transition(state)
+
+    if state == State.SIP_CALL:
+        if et == "sip_done":
+            return Transition(
+                State.DIAL_TONE,
+                actions=("sip_hangup", "fx_release", "dial_tone"),
+                reason="sip_done",
             )
         return Transition(state)
 
@@ -121,6 +162,12 @@ def _transition(state: State, event: Event) -> Transition:
                 reason="service_done",
             )
         if et == "digit":
+            if event.value == 9:
+                return Transition(
+                    State.OUTSIDE_LINE,
+                    actions=("audio_stop", "fx_outside"),
+                    reason="digit_9",
+                )
             return Transition(
                 State.PLAYING_SERVICE,
                 actions=_service_actions(event.value, stop_audio=True),

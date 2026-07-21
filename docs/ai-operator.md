@@ -8,7 +8,7 @@ Two ways to reach services on the WE302:
 | `1` / `2` | News / weather (cached) |
 | `3` | **WAMU 88.5** — live NPR stream ([playlist](https://static.wamu.org/streams/live/1/mp3.1.pls)) |
 | `8` | **Realtime information operator** — live voice via GPT Realtime |
-| `9` | Outside line (crossbar seize + dial tone) |
+| `9` | **Outside line** — Telnyx SIP (`docs/sip-outside-line.md`) |
 
 ## Local menu (digit 0)
 

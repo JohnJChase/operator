@@ -1,3 +1,24 @@
+build-pjsua:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p tools
+    if [[ -x tools/pjsua ]]; then
+      echo "tools/pjsua present"
+      exit 0
+    fi
+    work="$(mktemp -d)"
+    trap 'rm -rf "$work"' EXIT
+    git clone --depth 1 --branch 2.14.1 https://github.com/pjsip/pjproject.git "$work/pjproject"
+    (
+      cd "$work/pjproject"
+      ./configure --disable-video --disable-libwebrtc CFLAGS="-O2"
+      make dep
+      make -j"$(nproc)"
+    )
+    cp "$work"/pjproject/pjsip-apps/bin/pjsua-*-unknown-linux-gnu tools/pjsua
+    chmod +x tools/pjsua
+    echo "installed tools/pjsua"
+
 setup:
     # Pi needs system python3-lgpio for gpiozero (lgpio pin factory).
     uv venv --clear --system-site-packages

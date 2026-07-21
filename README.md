@@ -36,4 +36,5 @@ diagnostics. See `docs/pi-dev-environment.md` and
 `docs/hardware-profile-verified.md`.
 
 Leave-it-plugged-in: `docs/systemd.md` + `deploy/operator-os.service`.
-Operator modes (digit 0 menu, digit 8 Realtime): `docs/ai-operator.md`.
+Operator modes (digit 0 menu, digit 8 Realtime, digit 9 SIP): `docs/ai-operator.md`,
+`docs/sip-outside-line.md`.

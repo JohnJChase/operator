@@ -156,7 +156,7 @@ def run_loop(
 
     Hook is a hardware cutoff (highest priority, every path):
       1) GPIO hangup → audio.notify_hangup() (marks on-hook + kills aplay/arecord)
-         and RealtimeSession.cancel_now() if live
+         and RealtimeSession.cancel_now() / SipCallSession.hangup() if live
       2) Hook events drained before pulses every loop tick
       3) AudioRouter refuses new playback while on-hook
       4) Service playback is non-blocking so the loop can always see hangup
@@ -164,6 +164,10 @@ def run_loop(
     """
     import queue
 
+    from operator_os.refresh import load_dotenv
+    from operator_os.sip import SipCallSession, SipCredentials, normalize_nanp, sip_configured
+
+    load_dotenv()
     ctl = PhoneController()
     decoder = phone.decoder  # type: ignore[attr-defined]
     stop_at = time.monotonic() + max_seconds if max_seconds else None
@@ -171,21 +175,69 @@ def run_loop(
     # True while PLAYING_SERVICE audio was started non-blocking; hangup clears it.
     await_service_done = False
     op_session = None  # RealtimeSession | None
+    sip_session: SipCallSession | None = None
+    sip_dest: str | None = None
+    outside_digits = ""
+    outside_last_at: float | None = None
+    interdigit_s = float(profile.raw.get("timing", {}).get("outside_number_interdigit_timeout_ms", 2000)) / 1000.0
+    alsa_device = profile.audio.alsa_device
 
     def _status(msg: str) -> None:
         print(msg, flush=True)
 
+    def _hangup_sip() -> None:
+        nonlocal sip_session, sip_dest
+        if sip_session is not None:
+            sip_session.hangup()
+            sip_session = None
+        sip_dest = None
+
     def apply(tr) -> None:
-        nonlocal await_service_done, op_session
+        nonlocal await_service_done, op_session, sip_session, sip_dest
+        nonlocal outside_digits, outside_last_at
         for action in tr.actions:
+            if action == "sip_hangup":
+                _hangup_sip()
+                events.emit("sip", value="hangup")
+                continue
+            if action == "sip_dial":
+                _start_sip_call()
+                continue
             _do_action(action, phone, audio, events, ctl, live_audio)
         if tr.reason:
             _status(f"state={ctl.state.value}  ({tr.reason})")
         if ctl.state == State.ON_HOOK_IDLE:
             await_service_done = False
+            outside_digits = ""
+            outside_last_at = None
             if op_session is not None:
                 op_session.cancel_now()
                 op_session = None
+            _hangup_sip()
+        if ctl.state == State.OUTSIDE_LINE and tr.reason == "digit_9":
+            outside_digits = ""
+            outside_last_at = None
+
+    def _start_sip_call() -> None:
+        nonlocal sip_session, sip_dest
+        dest = sip_dest
+        if not dest or not live_audio:
+            return
+        creds = SipCredentials.from_env()
+        if creds is None:
+            audio.speak("Outside line is not configured.", wait=False)
+            return
+        audio.stop()
+        try:
+            sess = SipCallSession(e164=dest, credentials=creds, alsa_device=alsa_device)
+            sess.start()
+            sip_session = sess
+            events.emit("sip", value="dial", detail=dest)
+            _status(f"sip: dialing {dest}")
+        except Exception as e:
+            _status(f"sip: dial failed {e}")
+            events.emit("sip", value="error", detail=str(e)[:120])
+            audio.speak("Unable to complete the call.", wait=False)
 
     def on_hook_isr(off_hook: bool) -> None:
         nonlocal await_service_done, op_session
@@ -194,6 +246,7 @@ def run_loop(
             await_service_done = False  # don't treat kill as "service finished"
             if op_session is not None:
                 op_session.cancel_now()
+            _hangup_sip()
             audio.notify_hangup()
         q.put(("hook", off_hook))
 
@@ -204,6 +257,8 @@ def run_loop(
         q.put(("hook", True))
 
     _status(f"state={ctl.state.value}  (lift handset; Ctrl+C to quit)")
+    if live_audio and not sip_configured():
+        _status("sip: TELNYX_SIP_USER/PASSWORD not set — digit 9 collect only")
     try:
         while True:
             if stop_at and time.monotonic() >= stop_at:
@@ -223,9 +278,12 @@ def run_loop(
                     audio.set_hook(False)
                     decoder.reset()
                     await_service_done = False
+                    outside_digits = ""
+                    outside_last_at = None
                     if op_session is not None:
                         op_session.cancel_now()
                         op_session = None
+                    _hangup_sip()
             # If we went on-hook, drop pending pulses from this tick.
             if ctl.state == State.ON_HOOK_IDLE:
                 pulses = []
@@ -234,7 +292,9 @@ def run_loop(
             for pending in pulses:
                 if ctl.state == State.DIAL_TONE:
                     apply(ctl.handle(Event("pulse")))
-                elif ctl.state not in (State.DIAL_TONE, State.COLLECTING_DIGIT):
+                elif ctl.state == State.OUTSIDE_LINE:
+                    apply(ctl.handle(Event("pulse")))
+                elif ctl.state != State.COLLECTING_DIGIT:
                     decoder.reset()
                     continue
                 _status(f"pulse #{pending}")
@@ -254,8 +314,55 @@ def run_loop(
                     _flush_queue_pulses(q)
                     apply(ctl.handle(Event("service_done")))
 
+            # SIP call ended remotely → release trunk.
+            if ctl.state == State.SIP_CALL and phone.is_off_hook():
+                if sip_session is None or not sip_session.is_alive():
+                    _flush_queue_pulses(q)
+                    apply(ctl.handle(Event("sip_done")))
+                    time.sleep(0.02)
+                    continue
+
+            # Outside line: wait interdigit silence, then place or cancel.
+            if ctl.state == State.OUTSIDE_LINE and phone.is_off_hook():
+                if (
+                    outside_digits
+                    and outside_last_at is not None
+                    and (time.monotonic() - outside_last_at) >= interdigit_s
+                ):
+                    e164 = normalize_nanp(outside_digits)
+                    outside_digits = ""
+                    outside_last_at = None
+                    decoder.reset()
+                    _flush_queue_pulses(q)
+                    if e164 is None:
+                        _status("sip: invalid number")
+                        if live_audio:
+                            audio.stop()
+                            audio.speak(
+                                "I'm sorry. That number is not valid.",
+                                wait=False,
+                            )
+                        apply(ctl.handle(Event("outside_cancel")))
+                    elif not sip_configured():
+                        _status("sip: not configured")
+                        if live_audio:
+                            audio.stop()
+                            audio.speak("Outside line is not configured.", wait=False)
+                        apply(ctl.handle(Event("outside_cancel")))
+                    else:
+                        sip_dest = e164
+                        apply(ctl.handle(Event("place_call")))
+                        if sip_session is None and live_audio:
+                            apply(ctl.handle(Event("sip_done")))
+                    time.sleep(0.02)
+                    continue
+
             now_ms = time.monotonic() * 1000
-            if ctl.state not in (State.DIAL_TONE, State.COLLECTING_DIGIT):
+            if ctl.state not in (
+                State.DIAL_TONE,
+                State.COLLECTING_DIGIT,
+                State.OUTSIDE_LINE,
+            ):
                 time.sleep(0.02)
                 continue
 
@@ -264,20 +371,32 @@ def run_loop(
                 pulses_n = 10 if digit == 0 else digit
                 events.emit("digit", value=digit, pulses=pulses_n)
                 _status(f"digit={digit}")
-                prev = ctl.state
-                tr = ctl.handle(Event("digit", value=digit))
-                events.emit(
-                    "state",
-                    **{"from": prev.value, "to": tr.state.value, "reason": tr.reason},
-                )
-                apply(tr)
-                decoder.reset()
-                result = handle_digit(digit)
-                await_service_done, op_session = _play_service(
-                    result, audio, events, live_audio, profile=profile
-                )
-                decoder.reset()
-                _flush_queue_pulses(q)
+                if ctl.state == State.OUTSIDE_LINE:
+                    outside_digits += str(digit)
+                    outside_last_at = time.monotonic()
+                    apply(ctl.handle(Event("digit", value=digit)))
+                    _status(f"outside digits={outside_digits}")
+                    decoder.reset()
+                    _flush_queue_pulses(q)
+                else:
+                    prev = ctl.state
+                    tr = ctl.handle(Event("digit", value=digit))
+                    events.emit(
+                        "state",
+                        **{"from": prev.value, "to": tr.state.value, "reason": tr.reason},
+                    )
+                    apply(tr)
+                    decoder.reset()
+                    if ctl.state == State.OUTSIDE_LINE:
+                        outside_digits = ""
+                        outside_last_at = None
+                    elif ctl.state == State.PLAYING_SERVICE:
+                        result = handle_digit(digit)
+                        await_service_done, op_session = _play_service(
+                            result, audio, events, live_audio, profile=profile
+                        )
+                    decoder.reset()
+                    _flush_queue_pulses(q)
             time.sleep(0.02)
     except KeyboardInterrupt:
         _status("quit")
