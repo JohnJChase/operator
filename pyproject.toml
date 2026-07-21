@@ -1,0 +1,33 @@
+[project]
+name = "operator-os"
+version = "0.1.0"
+description = "Western Electric 302 AI Telephone Exchange"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "gpiozero>=2.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+operator-os = "operator_os.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["operator_os"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"

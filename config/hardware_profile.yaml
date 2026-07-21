@@ -1,0 +1,191 @@
+# WE302 hardware profile template
+# Copy this to config/hardware_profile.yaml in the implementation repo after
+# Phase 0 verification. Do not hardcode these values in application code.
+
+profile:
+  name: rev_a_direct_bypass_gpio10
+  verified_at: "2026-07-20"
+  verified_by: "phase0-smoke"
+  notes:
+    - "Rev A profile as of 2026-07-20."
+    - "Verified: hook transitions, digits 0-9, ring pulse, 440 Hz, mic record."
+    - "Use trace/calibration only after rewire or if digit decode misbehaves."
+    - "See docs/hardware-profile-verified.md."
+
+raspberry_pi:
+  model: "Raspberry Pi 5"
+  gpio_backend: "gpiozero"
+
+repository:
+  remote: "git@github.com:JohnJChase/operator.git"
+  default_branch: main
+  pi_checkout_path: "~/operator"
+  workflow:
+    main_must_run_simulator: true
+    phase_branches: true
+    commit_after_phase_acceptance: true
+    tag_verified_milestones: true
+
+development_environment:
+  python_toolchain: uv
+  task_runner: just
+  virtualenv_path: ".venv"
+  dependency_source: pyproject.toml
+  lockfile: uv.lock
+  lockfile_committed: true
+  python_version_preference: "3.12 if practical on Pi; otherwise pin verified Python 3.11+"
+  no_global_pip_installs: true
+  fallback: "stdlib venv only if uv is temporarily unavailable; do not create a competing dependency workflow"
+  required_bootstrap_files:
+    - AGENTS.md
+    - .gitignore
+    - .python-version
+    - .env.example
+    - justfile
+    - pyproject.toml
+    - uv.lock
+
+gpio:
+  hook:
+    bcm: 17
+    direction: input
+    pull: up
+    expected_logic: "on-hook HIGH, off-hook LOW"
+    debounce_ms: 50
+
+  dial_pulse:
+    bcm: 10
+    direction: input
+    pull: up
+    # Contact is open at rest and closes to GND during each pulse on dial return.
+    # gpiozero Button should count when_pressed.
+    polarity: active_low_closure_to_ground
+    count_event: when_pressed
+    user_configurable_polarity: false
+    debounce_ms: 20
+    digit_done_ms: 700
+    off_normal_available: false
+    calibration_ui_desired: true
+
+  ring:
+    bcm: 23
+    direction: output
+    active: high
+    initial: low
+    cutoff_on_off_hook: true
+    hook_poll_ms_while_ringing: 50
+    max_ring_on_ms: 2000
+    cadence:
+      on_ms: 2000
+      off_ms: 4000
+
+audio:
+  device: "plughw:2,0"
+  sample_rate_hz: 16000
+  channels: 1
+  format: "S16_LE"
+  tts:
+    engine: piper
+    fallback: espeak
+    piper_voice: en_US-hfc_female-medium
+    piper_volume: 0.6
+    espeak_amplitude: 40
+    resample_tts_to_hz: 16000
+  policy:
+    mic_capture_on_hook: false
+    one_audio_route_at_a_time: true
+    no_direct_aplay_outside_audio_router: true
+    clipping_warning_enabled: true
+    software_sidetone_supported: true
+    software_sidetone_default_enabled: false
+    software_sidetone_owned_by_audio_router: true
+
+phone_wiring:
+  ring_hv:
+    black_magic_out_1: L1
+    black_magic_out_2: K
+    must_not_connect_to_ground: true
+
+  controls:
+    common: Y
+    hook_signal: BK
+    pulse_signal: BB
+
+  receiver:
+    atr2x_headphone_tip: "220 ohm -> WHITE_RX"
+    atr2x_headphone_sleeve: "RED/R common"
+
+  carbon_mic:
+    drive: "+5V -> 220 ohm -> 10k pot -> BLACK_MIC"
+    recording: "BLACK_MIC -> mic recording/gain coupling cap -> ATR2x mic tip"
+    recording_cap_polarity: "+ to BLACK_MIC, - to ATR2x mic tip"
+
+  sidetone:
+    path: "BLACK_MIC -> 470uF -> 1k pot -> 10 ohm -> WHITE_RX"
+    cap_polarity: "+ to BLACK_MIC, - to sidetone pot"
+    implemented_in_hardware: true
+    software_supplement_allowed: true
+
+providers:
+  sip:
+    provider: Telnyx
+  sms:
+    provider: Telnyx
+  contacts:
+    source: local_first
+  news:
+    provider: newsdata.io
+    refresh_time_local: "05:00"
+    cache_audio: news.mp3
+    cache_metadata: news.json
+    style: "1937 Movietone-style newsreel"
+    runtime_minutes: "2-3"
+    sections:
+      - "4-6 major stories"
+      - "local weather"
+      - "market report"
+      - "sports"
+      - "and finally"
+  weather:
+    provider: Open-Meteo
+    endpoint: "https://api.open-meteo.com/v1/forecast"
+    location_label: "Fairfax, Virginia area"
+    latitude: null
+    longitude: null
+
+timing:
+  hook_flash_min_ms: 100
+  hook_flash_max_ms: 700
+  definite_hangup_min_ms: 1000
+  outside_number_interdigit_timeout_ms: 2000
+
+safety:
+  ring_gpio_fails_off: true
+  ring_while_off_hook_allowed: false
+  hardware_ring_interlock_present: false
+  hardware_ring_interlock_desired: false
+  emergency_calling:
+    mode: explicitly_blocked
+    allowed_values:
+      - supported_and_tested
+      - explicitly_blocked
+      - deferred
+  premium_or_international_confirmation:
+    prompt: "This call may cost [amount] per minute. Dial 1 to confirm."
+    confirmation_digit: 1
+  private_call_audio_recording: false
+
+retention:
+  message_bodies_days: 90
+  call_logs_days: 90
+
+web_console:
+  auth: hard_coded_password_initial_build
+  bind_policy: local_or_lan
+  remote_access: tailscale
+  public_internet_exposure: false
+
+roadmap:
+  operator_box_permanent_form_factor: likely
+  generated_netlist_profile_sync: true
+  rev_b_audio_architecture: deferred
