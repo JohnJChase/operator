@@ -66,6 +66,7 @@ class AudioRouter:
         self._temps: list[Path] = []
         self._stream_stop = threading.Event()
         self._stream_thread: threading.Thread | None = None
+        self._stop_gen = 0  # bumped on every stop(); long ops abort if gen changes
         self._on_hook = True
         self.engine = "unloaded"
         self.model_path: Path | None = None
@@ -91,12 +92,37 @@ class AudioRouter:
         if self._on_hook:
             self.stop()
 
+    def notify_hangup(self) -> None:
+        """Hook interrupt: silence the receiver immediately (GPIO-thread safe).
+
+        State transitions still run on the main loop; this only cuts audio.
+        """
+        self.stop()
+
     def stop(self) -> None:
         with self._lock:
+            self._stop_gen += 1
             self._stop_locked()
 
     def close(self) -> None:
         self.stop()
+
+    def is_busy(self) -> bool:
+        """True while aplay (or tone stream) is still running."""
+        proc = self._proc
+        return proc is not None and proc.poll() is None
+
+    def _stopped_since(self, gen: int) -> bool:
+        return self._stop_gen != gen
+
+    def _interruptible_sleep(self, seconds: float, gen: int) -> bool:
+        """Sleep in short slices; return False if stop()/hangup interrupted."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if self._stopped_since(gen):
+                return False
+            time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+        return not self._stopped_since(gen)
 
     def play_tone(
         self,
@@ -118,13 +144,21 @@ class AudioRouter:
     def seize_outside_line(self) -> None:
         """Electromechanical seize: click/thud → blind spot → external CO dial tone.
 
-        See docs/crossbar-outside-line-effect.md.
+        See docs/crossbar-outside-line-effect.md. Abort immediately if hangup
+        interrupts mid-sequence.
         """
         self.stop()
-        time.sleep(_SEIZE_POST_DIGIT_MS / 1000.0)
+        gen = self._stop_gen
+        if not self._interruptible_sleep(_SEIZE_POST_DIGIT_MS / 1000.0, gen):
+            return
         click = build_crossbar_click(self.cfg.sample_rate_hz)
+        if self._stopped_since(gen):
+            return
         self._play_pcm_raw(click, self.cfg.sample_rate_hz, wait=True)
-        time.sleep(_SEIZE_BLIND_MS / 1000.0)
+        if self._stopped_since(gen):
+            return
+        if not self._interruptible_sleep(_SEIZE_BLIND_MS / 1000.0, gen):
+            return
         self._start_tone_stream(
             (350.0, 440.0),
             duration_s=None,
@@ -271,14 +305,14 @@ class AudioRouter:
                 self._proc = None
                 self._clear_temps()
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, *, wait: bool = True) -> None:
         text = text.strip()
         if not text:
             return
         wav = self.synthesize(text)
         if wav is None:
             return
-        self.play_file(wav, wait=True, ephemeral=True)
+        self.play_file(wav, wait=wait, ephemeral=True)
 
     def synthesize(self, text: str, output_path: Path | str | None = None) -> Path | None:
         """Render speech to WAV at cfg.sample_rate_hz (resample Piper/espeak if needed)."""

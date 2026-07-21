@@ -17,6 +17,7 @@ class ServiceResult:
 
 NEWS_AUDIO_CANDIDATES = (Path("data/news.wav"), Path("data/news.mp3"))
 NEWS_JSON = Path("data/news.json")
+WEATHER_AUDIO = Path("data/weather.wav")
 WEATHER_CACHE = Path("data/weather.json")
 
 
@@ -31,10 +32,10 @@ def handle_digit(digit: int) -> ServiceResult:
             ),
         )
     if digit == 1:
-        audio = _news_audio()
+        audio = _first_existing(NEWS_AUDIO_CANDIDATES)
         if audio is not None:
             return ServiceResult(digit=1, kind="play_file", text="", path=audio)
-        spoken = _news_spoken_fallback()
+        spoken = _json_spoken(NEWS_JSON)
         if spoken:
             return ServiceResult(digit=1, kind="speak", text=spoken)
         return ServiceResult(
@@ -43,7 +44,9 @@ def handle_digit(digit: int) -> ServiceResult:
             text="News of the Day is not yet on file. Please try again later.",
         )
     if digit == 2:
-        weather = _weather_summary()
+        if WEATHER_AUDIO.is_file() and WEATHER_AUDIO.stat().st_size > 0:
+            return ServiceResult(digit=2, kind="play_file", text="", path=WEATHER_AUDIO)
+        weather = _json_spoken(WEATHER_CACHE)
         if weather:
             return ServiceResult(digit=2, kind="speak", text=weather)
         return ServiceResult(
@@ -66,28 +69,18 @@ def handle_digit(digit: int) -> ServiceResult:
     return ServiceResult(digit=digit, kind="speak", text="Invalid selection.")
 
 
-def _news_audio() -> Path | None:
-    for path in NEWS_AUDIO_CANDIDATES:
+def _first_existing(paths: tuple[Path, ...]) -> Path | None:
+    for path in paths:
         if path.is_file() and path.stat().st_size > 0:
             return path
     return None
 
 
-def _news_spoken_fallback() -> str | None:
-    if not NEWS_JSON.is_file():
+def _json_spoken(path: Path) -> str | None:
+    if not path.is_file():
         return None
     try:
-        data = json.loads(NEWS_JSON.read_text(encoding="utf-8"))
-        return str(data.get("spoken") or "").strip() or None
-    except (OSError, ValueError):
-        return None
-
-
-def _weather_summary() -> str | None:
-    if not WEATHER_CACHE.is_file():
-        return None
-    try:
-        data = json.loads(WEATHER_CACHE.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         return str(data.get("spoken") or data.get("summary") or "").strip() or None
     except (OSError, ValueError):
         return None

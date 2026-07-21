@@ -1,6 +1,7 @@
 """Piper voice and WAV level checks."""
 
 import array
+import time
 from pathlib import Path
 
 import pytest
@@ -61,10 +62,53 @@ def test_crossbar_click_is_short_and_hot():
     pcm = build_crossbar_click(rate, seed=1)
     samples = array.array("h")
     samples.frombytes(pcm)
-    # Includes leading silence for device latency (~100ms) + body + tail.
     assert 0.20 * rate <= len(samples) <= 0.35 * rate
     peak = max(abs(s) for s in samples)
     assert peak > int(_TONE_AMP * 32767 * 1.4)
+
+
+def test_drain_hooks_before_pulses():
+    import queue
+
+    from operator_os.main import _drain_prioritized
+
+    q: queue.SimpleQueue = queue.SimpleQueue()
+    q.put(("pulse", 1))
+    q.put(("hook", False))
+    q.put(("pulse", 2))
+    q.put(("hook", True))
+    hooks, pulses = _drain_prioritized(q)
+    assert hooks == [False, True]
+    assert pulses == [1, 2]
+
+
+def test_stop_bumps_generation_and_aborts_sleep():
+    from operator_os.audio import AudioConfig, AudioRouter
+
+    cfg = AudioConfig(
+        alsa_device="null",
+        sample_rate_hz=16000,
+        channels=1,
+        format="S16_LE",
+        piper_voice="hfc_female",
+        piper_volume=0.6,
+    )
+    audio = AudioRouter(cfg)
+    gen = audio._stop_gen
+    # Hangup interrupt during a long sleep must return quickly.
+    import threading
+
+    def hangup_soon() -> None:
+        time.sleep(0.05)
+        audio.notify_hangup()
+
+    threading.Thread(target=hangup_soon, daemon=True).start()
+    t0 = time.perf_counter()
+    ok = audio._interruptible_sleep(2.0, gen)
+    elapsed = time.perf_counter() - t0
+    assert ok is False
+    assert elapsed < 0.5
+    audio.close()
 
 
 def test_analyze_existing_mic_recording_if_present():

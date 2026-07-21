@@ -120,25 +120,44 @@ def run_loop(
     live_audio: bool,
     max_seconds: float | None = None,
 ) -> int:
-    """Main telephone loop. GPIO callbacks only enqueue; audio runs here."""
+    """Main telephone loop.
+
+    Hook is an interrupt (highest priority):
+      1) GPIO hangup callback calls audio.notify_hangup() — cuts receiver NOW
+      2) Hook events are drained before pulses every loop tick
+      3) Service playback is non-blocking so the loop can always see hangup
+    Pulse callbacks only enqueue; they never touch audio.
+    """
     import queue
 
     ctl = PhoneController()
     decoder = phone.decoder  # type: ignore[attr-defined]
     stop_at = time.monotonic() + max_seconds if max_seconds else None
     q: queue.SimpleQueue[tuple] = queue.SimpleQueue()
+    # True while PLAYING_SERVICE audio was started non-blocking; hangup clears it.
+    await_service_done = False
 
     def _status(msg: str) -> None:
         print(msg, flush=True)
 
     def apply(tr) -> None:
+        nonlocal await_service_done
         for action in tr.actions:
             _do_action(action, phone, audio, events, ctl, live_audio)
         if tr.reason:
             _status(f"state={ctl.state.value}  ({tr.reason})")
+        if ctl.state == State.ON_HOOK_IDLE:
+            await_service_done = False
 
-    # GPIO/sim callbacks must not touch audio — stop() used to block pulse ISR.
-    phone.on_hook_change(lambda off: q.put(("hook", off)))
+    def on_hook_isr(off_hook: bool) -> None:
+        nonlocal await_service_done
+        # Interrupt path: silence first, then ask main loop for state change.
+        if not off_hook:
+            await_service_done = False  # don't treat kill as "service finished"
+            audio.notify_hangup()
+        q.put(("hook", off_hook))
+
+    phone.on_hook_change(on_hook_isr)
     phone.on_pulse(lambda: q.put(("pulse", decoder.pending_pulses)))
 
     if phone.is_off_hook() and ctl.state == State.ON_HOOK_IDLE:
@@ -150,31 +169,45 @@ def run_loop(
             if stop_at and time.monotonic() >= stop_at:
                 return 0
 
-            while True:
-                try:
-                    kind, value = q.get_nowait()
-                except queue.Empty:
-                    break
-                if kind == "hook":
-                    if value:
-                        events.emit("hook", value="off_hook")
-                        _status("hook=OFF_HOOK")
-                        apply(ctl.handle(Event("off_hook")))
-                        audio.set_hook(True)
-                    else:
-                        events.emit("hook", value="on_hook")
-                        _status("hook=ON_HOOK")
-                        apply(ctl.handle(Event("on_hook")))
-                        audio.set_hook(False)
-                        decoder.reset()
-                elif kind == "pulse":
-                    if ctl.state == State.DIAL_TONE:
-                        apply(ctl.handle(Event("pulse")))
-                    elif ctl.state not in (State.DIAL_TONE, State.COLLECTING_DIGIT):
-                        # Ignore dial chatter during announcements / outside tone.
-                        decoder.reset()
-                        continue
-                    _status(f"pulse #{value}")
+            hooks, pulses = _drain_prioritized(q)
+            for off_hook in hooks:
+                if off_hook:
+                    events.emit("hook", value="off_hook")
+                    _status("hook=OFF_HOOK")
+                    apply(ctl.handle(Event("off_hook")))
+                    audio.set_hook(True)
+                else:
+                    events.emit("hook", value="on_hook")
+                    _status("hook=ON_HOOK")
+                    apply(ctl.handle(Event("on_hook")))
+                    audio.set_hook(False)
+                    decoder.reset()
+                    await_service_done = False
+            # If we went on-hook, drop pending pulses from this tick.
+            if ctl.state == State.ON_HOOK_IDLE:
+                pulses = []
+                decoder.reset()
+
+            for pending in pulses:
+                if ctl.state == State.DIAL_TONE:
+                    apply(ctl.handle(Event("pulse")))
+                elif ctl.state not in (State.DIAL_TONE, State.COLLECTING_DIGIT):
+                    decoder.reset()
+                    continue
+                _status(f"pulse #{pending}")
+
+            # Playback ended while still off-hook → return to dial tone.
+            # Hangup kills aplay too; never treat that as service_done (dial-tone blip).
+            if (
+                ctl.state == State.PLAYING_SERVICE
+                and await_service_done
+                and not audio.is_busy()
+                and phone.is_off_hook()
+            ):
+                await_service_done = False
+                decoder.reset()
+                _flush_queue_pulses(q)
+                apply(ctl.handle(Event("service_done")))
 
             now_ms = time.monotonic() * 1000
             if ctl.state not in (State.DIAL_TONE, State.COLLECTING_DIGIT):
@@ -183,8 +216,8 @@ def run_loop(
 
             digit = decoder.poll(now_ms)
             if digit is not None:
-                pulses = 10 if digit == 0 else digit
-                events.emit("digit", value=digit, pulses=pulses)
+                pulses_n = 10 if digit == 0 else digit
+                events.emit("digit", value=digit, pulses=pulses_n)
                 _status(f"digit={digit}")
                 prev = ctl.state
                 tr = ctl.handle(Event("digit", value=digit))
@@ -195,18 +228,32 @@ def run_loop(
                 apply(tr)
                 decoder.reset()
                 result = handle_digit(digit)
-                _play_service(result, audio, events, live_audio)
-                # Dial activity during TTS must not become a digit after the announcement.
+                await_service_done = _play_service(result, audio, events, live_audio)
                 decoder.reset()
                 _flush_queue_pulses(q)
-                # Outside-line seize leaves external dial tone running until hangup.
-                if ctl.state == State.PLAYING_SERVICE and result.kind != "outside_seize":
-                    apply(ctl.handle(Event("service_done")))
             time.sleep(0.02)
     except KeyboardInterrupt:
         _status("quit")
         apply(ctl.handle(Event("hangup")))
         return 0
+
+
+def _drain_prioritized(q) -> tuple[list[bool], list[int]]:
+    """Drain the event queue; hooks are returned first (interrupt priority)."""
+    import queue as _queue
+
+    hooks: list[bool] = []
+    pulses: list[int] = []
+    while True:
+        try:
+            kind, value = q.get_nowait()
+        except _queue.Empty:
+            break
+        if kind == "hook":
+            hooks.append(bool(value))
+        elif kind == "pulse":
+            pulses.append(int(value))
+    return hooks, pulses
 
 
 def _flush_queue_pulses(q) -> None:
@@ -233,10 +280,11 @@ def _do_action(action, phone, audio, events, ctl, live_audio) -> None:
     elif action == "ring_start":
         phone.ring_start()
     elif action == "dial_tone":
-        if live_audio:
+        # Never start dial tone on-hook (hangup must not blip tone).
+        if live_audio and phone.is_off_hook():
             audio.set_hook(True)
             audio.play_tone("dial", wait=False)
-        events.emit("audio", value="dial_tone")
+            events.emit("audio", value="dial_tone")
     elif action == "play_service":
         pass  # handled after digit via _play_service
     if action in ("audio_stop", "ring_stop") and ctl.state.value == "ON_HOOK_IDLE":
@@ -244,22 +292,30 @@ def _do_action(action, phone, audio, events, ctl, live_audio) -> None:
             phone.decoder.reset()
 
 
-def _play_service(result: ServiceResult, audio: AudioRouter, events: EventLog, live: bool) -> None:
+def _play_service(result: ServiceResult, audio: AudioRouter, events: EventLog, live: bool) -> bool:
+    """Start service audio. Returns True if main loop should await idle then service_done.
+
+    Live playback must not block — hangup is processed on the main loop and must
+    preempt news/weather/announcements immediately.
+    """
     events.emit("service", digit=result.digit, kind=result.kind)
     print(f"service digit={result.digit} kind={result.kind}: {result.text or result.path}", flush=True)
     if not live:
-        return
+        return False
     if result.kind == "outside_seize":
+        # Short click+tone start; external dial tone runs until hangup.
         audio.seize_outside_line()
-        return
+        return False
     audio.stop()
     if result.kind == "play_file" and result.path:
-        audio.play_file(result.path, wait=True)
-    elif result.kind == "effect_then_speak":
+        audio.play_file(result.path, wait=False)
+        return True
+    if result.kind == "effect_then_speak":
         audio.play_tone("crossbar", seconds=0.4, wait=True)
-        audio.speak(result.text)
-    else:
-        audio.speak(result.text)
+        audio.speak(result.text, wait=False)
+        return True
+    audio.speak(result.text, wait=False)
+    return True
 
 
 def _run_script(phone: SimulatorPhone, audio: AudioRouter, events: EventLog, script: str) -> int:

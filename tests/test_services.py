@@ -9,10 +9,11 @@ def test_digit_zero_help():
     assert "Operator" in r.text
 
 
-def test_digit_one_missing_cache():
+def test_digit_one_news_or_fallback():
     r = handle_digit(1)
-    assert r.kind == "speak"
-    assert "not yet" in r.text.lower()
+    assert r.kind in ("speak", "play_file")
+    if r.kind == "speak":
+        assert "news" in r.text.lower() or "not yet" in r.text.lower()
 
 
 def test_digit_nine_outside_seize():

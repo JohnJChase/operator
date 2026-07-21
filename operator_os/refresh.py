@@ -16,6 +16,7 @@ from operator_os.config import HardwareProfile
 
 DATA = Path("data")
 WEATHER_JSON = DATA / "weather.json"
+WEATHER_WAV = DATA / "weather.wav"
 NEWS_JSON = DATA / "news.json"
 NEWS_WAV = DATA / "news.wav"
 NEWS_MP3 = DATA / "news.mp3"
@@ -121,6 +122,15 @@ def refresh_weather(profile: HardwareProfile) -> Path:
         "current": raw.get("current", {}),
     }
     WEATHER_JSON.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    audio = AudioRouter(profile.audio)
+    try:
+        out = audio.synthesize(spoken, output_path=WEATHER_WAV)
+        if out is None:
+            print("weather: json ok, TTS wav failed (digit 2 will speak text)", flush=True)
+        else:
+            print(f"weather audio: {WEATHER_WAV}", flush=True)
+    finally:
+        audio.close()
     return WEATHER_JSON
 
 

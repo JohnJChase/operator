@@ -22,9 +22,17 @@ just setup
 use the OS `python3-lgpio` pin factory on Raspberry Pi OS. A plain
 `uv sync` without that flag will fail GPIO open with `BadPinFactory`.
 
-Prefer `just <recipe>` over `uv run operator-os ...`. The just recipes are thin
-wrappers; use `uv run` only when you need argparse flags that a recipe does not
-expose yet (`just --list` shows what exists).
+## Hook priority (interrupt)
+
+The switchhook is the highest-priority input — treat it like an interrupt:
+
+1. **GPIO hangup callback** calls `audio.notify_hangup()` / `stop()` immediately
+   (cuts the receiver even if the main loop is between ticks).
+2. **Main loop** drains hook events before dial pulses every iteration.
+3. **Service audio** (news, weather, announcements) starts non-blocking so the
+   loop can always observe hangup; never `wait=True` on long playback in `run`.
+
+Pulse callbacks only enqueue counts — they must not call audio.
 
 ## TTS (Piper)
 
