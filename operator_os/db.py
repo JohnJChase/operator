@@ -357,3 +357,48 @@ def delete_voicemail(voicemail_id: int) -> bool:
     except OSError:
         pass
     return True
+
+
+@dataclass(frozen=True)
+class WaitingItem:
+    """One unheard SMS or voicemail for the universal inbox (chrono merge)."""
+
+    kind: str  # "sms" | "vm"
+    id: int
+    from_e164: str
+    created_at: float
+    body: str = ""
+    path: str = ""
+
+
+def waiting_count() -> int:
+    return unheard_count() + unheard_voicemail_count()
+
+
+def list_waiting_chrono(*, limit: int = 20) -> list[WaitingItem]:
+    """Unheard inbound SMS + voicemails, oldest first."""
+    init_db()
+    lim = max(1, int(limit))
+    items: list[WaitingItem] = []
+    for m in list_unheard(limit=lim):
+        items.append(
+            WaitingItem(
+                kind="sms",
+                id=m.id,
+                from_e164=m.from_e164,
+                created_at=m.created_at,
+                body=m.body,
+            )
+        )
+    for vm in list_unheard_voicemails(limit=lim):
+        items.append(
+            WaitingItem(
+                kind="vm",
+                id=vm.id,
+                from_e164=vm.from_e164,
+                created_at=vm.created_at,
+                path=vm.path,
+            )
+        )
+    items.sort(key=lambda x: x.created_at)
+    return items[:lim]

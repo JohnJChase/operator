@@ -180,7 +180,21 @@ class AudioRouter:
         if key in ("dial", "dial_tone") and not wait:
             self._start_tone_stream(freqs, duration_s=None, wait=False, fade_in_ms=fade_in_ms)
             return
+        if key in ("stutter_dial", "stutter_dial_tone"):
+            stutter_s = seconds if seconds > 0 else 2.5
+            self._start_tone_stream(
+                freqs,
+                duration_s=None,
+                wait=wait,
+                fade_in_ms=fade_in_ms,
+                stutter_s=stutter_s,
+            )
+            return
         self._start_tone_stream(freqs, duration_s=seconds, wait=wait, fade_in_ms=fade_in_ms)
+
+    def play_stutter_dial(self, stutter_s: float = 2.5, *, wait: bool = False) -> None:
+        """Audible MWI: interrupted dial tone, then continuous dial until stop()."""
+        self.play_tone("stutter_dial", seconds=stutter_s, wait=wait)
 
     def play_plant(self, name: str, *, wait: bool = True) -> None:
         """Play a named line-plant signature from a transition action.
@@ -247,6 +261,7 @@ class AudioRouter:
         duration_s: float | None,
         wait: bool,
         fade_in_ms: int = 0,
+        stutter_s: float | None = None,
     ) -> None:
         if self._on_hook:
             return
@@ -277,7 +292,7 @@ class AudioRouter:
             )
             thread = threading.Thread(
                 target=self._tone_writer,
-                args=(freqs, rate, duration_s, fade_in_ms, self._proc),
+                args=(freqs, rate, duration_s, fade_in_ms, self._proc, stutter_s),
                 daemon=True,
             )
             self._stream_thread = thread
@@ -297,11 +312,15 @@ class AudioRouter:
         duration_s: float | None,
         fade_in_ms: int,
         proc: subprocess.Popen[bytes],
+        stutter_s: float | None = None,
     ) -> None:
         chunk = max(2, int(rate * _TONE_CHUNK_MS / 1000))
         sample_i = 0
         end_i = None if duration_s is None else int(rate * duration_s)
         fade_n = max(0, int(rate * fade_in_ms / 1000.0))
+        # Classic CO MWI: ~100ms on / 100ms off of dial frequencies, then continuous.
+        stutter_n = int(rate * stutter_s) if stutter_s and stutter_s > 0 else 0
+        period = max(1, int(rate * 0.1))  # 100ms
         stdin = proc.stdin
         if stdin is None:
             return
@@ -314,6 +333,9 @@ class AudioRouter:
                     n = min(chunk, end_i - sample_i)
                 buf = array.array("h")
                 for i in range(sample_i, sample_i + n):
+                    if stutter_n > 0 and i < stutter_n and ((i // period) % 2) == 1:
+                        buf.append(0)
+                        continue
                     t = i / rate
                     val = sum(math.sin(2 * math.pi * f * t) for f in freqs) / max(1, len(freqs))
                     if fade_n > 0 and i < fade_n:
@@ -812,7 +834,7 @@ def _tone_freqs(name_or_hz: str | float | tuple[float, ...]) -> tuple[float, ...
     if isinstance(name_or_hz, tuple):
         return name_or_hz
     name = str(name_or_hz).lower()
-    if name in ("dial", "dial_tone"):
+    if name in ("dial", "dial_tone", "stutter_dial", "stutter_dial_tone"):
         return (350.0, 440.0)
     if name in ("busy", "reorder"):
         return (480.0, 620.0)

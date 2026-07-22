@@ -8,7 +8,7 @@ Two ways to reach services:
 | `1` / `2` | News / weather (cached) |
 | `3` | **WAMU 88.5** — live NPR stream |
 | `4` | **NWS radio** — NOAA Weather Radio KHB36 |
-| `5` | **Voicemail** — play unheard messages (flash = next) |
+| `5` | **Messages** — universal inbox (SMS + voicemail, chrono); flash skips / reply / callback |
 | `7` | **Join meeting** — Google Calendar Meet phone dial-in + PIN |
 | `8` | **Information desk** — turn-based STT → tools → Piper |
 | `9` | **Outside line** — Telnyx SIP |
@@ -51,7 +51,7 @@ list/play/delete/callback voicemail.
 The model never touches GPIO, ALSA, shell, or provider HTTP directly.
 
 See [sms.md](sms.md) for Telnyx Messaging + webhook setup.
-See [voicemail.md](voicemail.md) for missed-call recording and digit 5.
+See [voicemail.md](voicemail.md) for missed-call recording, MWI stutter, and digit 5 inbox.
 
 ### CLI smoke (no mic)
 

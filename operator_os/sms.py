@@ -47,6 +47,29 @@ def inject_token() -> str:
     return os.environ.get("OPERATOR_SMS_INJECT_TOKEN", "local-dev").strip() or "local-dev"
 
 
+def _log_outbound_status(payload: dict[str, Any]) -> None:
+    """Journal delivery receipts (API accept ≠ handset delivery)."""
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    if not isinstance(data, dict):
+        return
+    inner = data.get("payload") if isinstance(data.get("payload"), dict) else data
+    if not isinstance(inner, dict):
+        return
+    if str(inner.get("direction") or "").lower() not in ("outbound", "out"):
+        return
+    mid = str(inner.get("id") or "")[:40]
+    errs = inner.get("errors") or []
+    to = inner.get("to")
+    status = ""
+    if isinstance(to, list) and to and isinstance(to[0], dict):
+        status = str(to[0].get("status") or "")
+    detail = ""
+    if isinstance(errs, list) and errs and isinstance(errs[0], dict):
+        detail = str(errs[0].get("detail") or errs[0].get("title") or "")[:120]
+    if status or detail:
+        print(f"sms: outbound id={mid} status={status or '?'} {detail}".rstrip(), flush=True)
+
+
 INJECT_HEADER = "X-Operator-Inject-Token"
 
 
@@ -111,6 +134,8 @@ def send_sms(to: str, text: str) -> SendResult:
         raise RuntimeError(f"Telnyx network error: {e}") from e
     msg = (raw.get("data") or {}) if isinstance(raw, dict) else {}
     tid = str(msg.get("id") or "").strip()
+    if not tid:
+        raise RuntimeError(f"Telnyx send returned no id: {raw!r}"[:300])
     return SendResult(
         telnyx_id=tid,
         to_e164=dest,
@@ -292,6 +317,7 @@ class SmsWebhookServer:
                     }
                 if parsed is None:
                     # Ack delivery receipts so Telnyx stops retrying.
+                    _log_outbound_status(payload)
                     self.send_response(200)
                     self.send_header("Content-Length", "2")
                     self.end_headers()

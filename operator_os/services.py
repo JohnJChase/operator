@@ -14,7 +14,7 @@ NWS_KHB36 = "https://stream.mikev.com/khb36.mp3"
 LOCAL_MENU = (
     "Operator. Dial 1 for news, 2 for weather, "
     "3 for WAMU, 4 for weather radio, "
-    "5 for voicemail, "
+    "5 for messages, "
     "7 to join a meeting, "
     "8 for the information desk, 9 for outside line. "
     "Dial 0 to hear this again."
@@ -40,21 +40,15 @@ def handle_digit(digit: int) -> ServiceResult:
     if digit == 0:
         text = LOCAL_MENU
         try:
-            from operator_os.db import unheard_count, unheard_voicemail_count
+            from operator_os.db import waiting_count
 
-            n = unheard_count()
-            nv = unheard_voicemail_count()
+            n = waiting_count()
         except Exception:
             n = 0
-            nv = 0
         if n == 1:
-            text = f"{text} You have 1 unheard message."
+            text = f"{text} You have 1 waiting message. Dial 5 for messages."
         elif n > 1:
-            text = f"{text} You have {n} unheard messages."
-        if nv == 1:
-            text = f"{text} You have 1 new voicemail."
-        elif nv > 1:
-            text = f"{text} You have {nv} new voicemails."
+            text = f"{text} You have {n} waiting messages. Dial 5 for messages."
         return ServiceResult(digit=0, kind="speak", text=text)
     if digit == 1:
         audio = _first_existing(NEWS_AUDIO_CANDIDATES)
@@ -94,7 +88,7 @@ def handle_digit(digit: int) -> ServiceResult:
             url=NWS_KHB36,
         )
     if digit == 5:
-        return ServiceResult(digit=5, kind="mailbox", text="Voicemail.")
+        return ServiceResult(digit=5, kind="mailbox", text="Messages.")
     if digit == 7:
         return ServiceResult(digit=7, kind="join_meeting", text="Join meeting.")
     if digit == 8:

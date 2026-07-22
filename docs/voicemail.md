@@ -24,8 +24,9 @@ See [audio-line.md](audio-line.md). Short version:
 
 | Path | How |
 |------|-----|
-| Digit **5** | Mailbox: announce count, play unheard; **hook flash** skips; hangup stops |
-| Digit **0** | Menu mentions new voicemail count |
+| Digit **5** | Universal inbox: unheard SMS + voicemail, oldest first. Flash **during** a clip skips; after a VM, “Flash to call back” dials `from_e164` over SIP. Hangup stops. |
+| Off-hook | Stutter dial tone when any SMS or VM waits (`mwi_stutter_ms`), then normal dial. |
+| Digit **0** | “N waiting messages” + dial 5 |
 | Info desk (8) | `list_voicemails` / `play_voicemail` / `delete_voicemail` / `callback_voicemail` |
 
-Callback announces the number; place the call with digit **9** (no auto-dial).
+Desk `callback_voicemail` still announces the number for a manual digit-**9** place; inbox flash-to-callback auto-dials.

@@ -287,8 +287,20 @@ def run_loop(
     vm_until: float | None = None
     interdigit_s = float(profile.raw.get("timing", {}).get("outside_number_interdigit_timeout_ms", 2000)) / 1000.0
     inbound_ring_s = float(profile.raw.get("timing", {}).get("inbound_ring_timeout_ms", 45000)) / 1000.0
-    sms_ring_s = float(profile.raw.get("timing", {}).get("sms_ring_timeout_ms", 20000)) / 1000.0
+    # Quiet pickup window after SMS double-ring (legacy key: sms_ring_timeout_ms).
+    sms_ring_s = float(
+        profile.raw.get("timing", {}).get(
+            "sms_pickup_window_ms",
+            profile.raw.get("timing", {}).get("sms_ring_timeout_ms", 30000),
+        )
+    ) / 1000.0
+    sms_double_on_ms = int(profile.raw.get("timing", {}).get("sms_double_on_ms", 400))
+    sms_double_gap_ms = int(profile.raw.get("timing", {}).get("sms_double_gap_ms", 200))
     vm_record_s = float(profile.raw.get("timing", {}).get("voicemail_record_ms", 30000)) / 1000.0
+    mwi_stutter_s = float(profile.raw.get("timing", {}).get("mwi_stutter_ms", 2500)) / 1000.0
+    inbox_flash_wait_s = float(
+        profile.raw.get("timing", {}).get("inbox_flash_wait_ms", 8000)
+    ) / 1000.0
     alsa_device = profile.audio.alsa_device
     hook_clf = HookFlashClassifier.from_profile(profile)
     sms_webhook: SmsWebhookServer | None = None
@@ -403,7 +415,15 @@ def run_loop(
                 _stop_inbound()
                 _start_sip_call()
                 continue
-            _do_action(action, phone, audio, events, ctl, live_audio)
+            _do_action(
+                action,
+                phone,
+                audio,
+                events,
+                ctl,
+                live_audio,
+                mwi_stutter_s=mwi_stutter_s,
+            )
         if tr.reason:
             _status(f"state={ctl.state.value}  ({tr.reason})")
         if ctl.state == State.ON_HOOK_IDLE:
@@ -584,18 +604,28 @@ def run_loop(
         sms_ring_deadline = None
 
     def _speak_inbound_sms(message_id: int) -> None:
+        nonlocal op_session
         from operator_os import db as store
+        from operator_os.mailbox import start_sms_reply
+        from operator_os.sip import speak_phone_number
 
         msg = store.get_message(message_id)
         if msg is None:
             return
         who = msg.from_e164 or "unknown"
-        from operator_os.sip import speak_phone_number
-
         spoken_from = speak_phone_number(who) if who != "unknown" else "unknown"
         audio.speak(f"Message from {spoken_from}: {msg.body}", wait=True)
         store.mark_heard(message_id)
         events.emit("sms", value="heard", digit=message_id)
+        if audio.is_on_hook or not live_audio:
+            return
+        # Flash-to-reply window (same as digit-5 inbox after an SMS item).
+        op_session = start_sms_reply(
+            audio,
+            events,
+            msg.from_e164,
+            flash_wait_s=inbox_flash_wait_s,
+        )
 
     def _handle_sms_notify(message_id: int) -> None:
         nonlocal sms_announce_id, sms_ring_deadline
@@ -605,14 +635,23 @@ def run_loop(
             return
         if sms_announce_id is not None:
             events.emit("sms", value="queued", digit=message_id)
-            _status(f"sms: queued id={message_id} (already ringing)")
+            _status(f"sms: queued id={message_id} (already announcing)")
             return
         sms_announce_id = message_id
+        # Double-ring once, then quiet pickup window (default 30s).
         sms_ring_deadline = time.monotonic() + sms_ring_s
         events.emit("sms", value="ring", digit=message_id)
-        _status(f"sms: ringing for id={message_id}")
+        _status(
+            f"sms: double-ring id={message_id} "
+            f"(pickup {sms_ring_s:.0f}s)"
+        )
         try:
-            phone.ring_start()
+            phone.ring_pattern(
+                [
+                    (sms_double_on_ms, sms_double_gap_ms),
+                    (sms_double_on_ms, 0),
+                ]
+            )
         except Exception as e:
             _status(f"sms: ring failed {e}")
             sms_announce_id = None
@@ -699,9 +738,23 @@ def run_loop(
             if stop_at and time.monotonic() >= stop_at:
                 return 0
 
-            hooks, pulses, sms_ids = _drain_prioritized(q)
+            hooks, pulses, sms_ids, callbacks = _drain_prioritized(q)
             for mid in sms_ids:
                 _handle_sms_notify(mid)
+            for e164 in callbacks:
+                # Voicemail flash-to-callback from digit-5 inbox.
+                if op_session is not None:
+                    try:
+                        op_session.cancel_now()
+                    except Exception:
+                        pass
+                    op_session = None
+                await_service_done = False
+                sip_dest = e164
+                if ctl.state == State.PLAYING_SERVICE and e164:
+                    apply(ctl.handle(Event("place_call")))
+                    if sip_session is None and live_audio:
+                        apply(ctl.handle(Event("sip_done")))
             for off_hook in hooks:
                 for kind in hook_clf.feed(bool(off_hook)):
                     _apply_hook_event(kind)
@@ -712,7 +765,7 @@ def run_loop(
                 pulses = []
                 decoder.reset()
 
-            # SMS ring timeout → leave message queued.
+            # SMS pickup window expired → leave message queued for digit 5.
             if (
                 sms_announce_id is not None
                 and sms_ring_deadline is not None
@@ -800,6 +853,30 @@ def run_loop(
                     decoder.reset()
                     _flush_queue_pulses(q)
                     apply(ctl.handle(Event("service_done")))
+
+            # Live SMS reply session finished while on dial tone → restore tone.
+            if (
+                ctl.state == State.DIAL_TONE
+                and op_session is not None
+                and not op_session.is_alive()
+                and phone.is_off_hook()
+                and live_audio
+            ):
+                op_session = None
+                if not audio.is_busy():
+                    audio.set_hook(True)
+                    try:
+                        from operator_os.db import waiting_count
+
+                        waiting = waiting_count() > 0
+                    except Exception:
+                        waiting = False
+                    if waiting:
+                        audio.play_stutter_dial(mwi_stutter_s, wait=False)
+                        events.emit("audio", value="stutter_dial")
+                    else:
+                        audio.play_tone("dial", wait=False)
+                        events.emit("audio", value="dial_tone")
 
             # SIP call ended remotely → release trunk.
             if ctl.state == State.SIP_CALL and phone.is_off_hook():
@@ -895,8 +972,20 @@ def run_loop(
                                     apply(ctl.handle(Event("sip_done")))
                             op_session = None
                         else:
+                            def _inbox_callback(e164: str) -> None:
+                                nonlocal await_service_done
+                                # Clear before the inbox thread exits so we don't
+                                # service_done → dial tone over a pending callback.
+                                await_service_done = False
+                                q.put(("callback", e164))
+
                             await_service_done, op_session = _play_service(
-                                result, audio, events, live_audio, profile=profile
+                                result,
+                                audio,
+                                events,
+                                live_audio,
+                                profile=profile,
+                                request_callback=_inbox_callback,
                             )
                     decoder.reset()
                     _flush_queue_pulses(q)
@@ -911,13 +1000,14 @@ def run_loop(
         return 0
 
 
-def _drain_prioritized(q) -> tuple[list[bool], list[int], list[int]]:
-    """Drain the event queue; hooks first, then pulses and sms ids."""
+def _drain_prioritized(q) -> tuple[list[bool], list[int], list[int], list[str]]:
+    """Drain the event queue; hooks first, then pulses, sms ids, callbacks."""
     import queue as _queue
 
     hooks: list[bool] = []
     pulses: list[int] = []
     sms_ids: list[int] = []
+    callbacks: list[str] = []
     while True:
         try:
             kind, value = q.get_nowait()
@@ -929,7 +1019,9 @@ def _drain_prioritized(q) -> tuple[list[bool], list[int], list[int]]:
             pulses.append(int(value))
         elif kind == "sms":
             sms_ids.append(int(value))
-    return hooks, pulses, sms_ids
+        elif kind == "callback":
+            callbacks.append(str(value or ""))
+    return hooks, pulses, sms_ids, callbacks
 
 
 def _flush_queue_pulses(q) -> None:
@@ -948,7 +1040,16 @@ def _flush_queue_pulses(q) -> None:
         q.put(item)
 
 
-def _do_action(action, phone, audio, events, ctl, live_audio) -> None:
+def _do_action(
+    action,
+    phone,
+    audio,
+    events,
+    ctl,
+    live_audio,
+    *,
+    mwi_stutter_s: float = 2.5,
+) -> None:
     if action == "audio_stop":
         # Hangup lands in ON_HOOK_IDLE first — that path is the hardware cutoff.
         # Other audio_stop (kill dial tone for a digit) must stay off-hook.
@@ -975,8 +1076,18 @@ def _do_action(action, phone, audio, events, ctl, live_audio) -> None:
         # Never start dial tone on-hook (hangup must not blip tone).
         if live_audio and phone.is_off_hook():
             audio.set_hook(True)
-            audio.play_tone("dial", wait=False)
-            events.emit("audio", value="dial_tone")
+            try:
+                from operator_os.db import waiting_count
+
+                waiting = waiting_count() > 0
+            except Exception:
+                waiting = False
+            if waiting:
+                audio.play_stutter_dial(mwi_stutter_s, wait=False)
+                events.emit("audio", value="stutter_dial")
+            else:
+                audio.play_tone("dial", wait=False)
+                events.emit("audio", value="dial_tone")
     elif action == "play_service":
         pass  # handled after digit via _play_service
     if action in ("audio_stop", "ring_stop") and ctl.state.value == "ON_HOOK_IDLE":
@@ -991,6 +1102,7 @@ def _play_service(
     live: bool,
     *,
     profile: HardwareProfile | None = None,
+    request_callback=None,
 ) -> tuple[bool, object | None]:
     """Start service content only. Plant FX come from the transition chart.
 
@@ -1015,7 +1127,17 @@ def _play_service(
     if result.kind == "mailbox":
         from operator_os.mailbox import start_mailbox
 
-        session = start_mailbox(audio, events)
+        flash_wait = 8.0
+        if profile is not None:
+            flash_wait = float(
+                profile.raw.get("timing", {}).get("inbox_flash_wait_ms", 8000)
+            ) / 1000.0
+        session = start_mailbox(
+            audio,
+            events,
+            flash_wait_s=flash_wait,
+            request_callback=request_callback,
+        )
         return True, session
     if result.kind == "join_meeting":
         # Live path dials from the main loop; script/sim just announces.

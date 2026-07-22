@@ -107,6 +107,10 @@ class PhoneIO:
     def ring_stop(self) -> None:
         raise NotImplementedError
 
+    def ring_pattern(self, bursts: list[tuple[int, int]]) -> None:
+        """One-shot ring alert: list of (on_ms, off_ms). Default: continuous cadence via ring_start."""
+        self.ring_start()
+
     def on_pulse(self, callback: PulseCallback) -> None:
         raise NotImplementedError
 
@@ -252,6 +256,25 @@ class SimulatorPhone(PhoneIO):
     def ring_stop(self) -> None:
         self.ringing = False
 
+    def ring_pattern(self, bursts: list[tuple[int, int]]) -> None:
+        """Simulator: mark ringing briefly (pattern timing not simulated)."""
+        if self.off_hook:
+            return
+        self.ringing = True
+        # Leave ringing True until ring_stop — tests / script can stop explicitly.
+        # For SMS alert, main still owns the pickup window.
+        if not bursts:
+            return
+        # Auto-clear after nominal pattern duration so sim doesn't stick.
+        total_ms = sum(max(0, int(on)) + max(0, int(off)) for on, off in bursts)
+
+        def _clear() -> None:
+            time.sleep(max(0.05, total_ms / 1000.0))
+            if self.ringing:
+                self.ringing = False
+
+        threading.Thread(target=_clear, daemon=True).start()
+
     def on_pulse(self, callback: PulseCallback) -> None:
         self._pulse_cb = callback
 
@@ -310,6 +333,24 @@ class GpioPhone(PhoneIO):
         if self._ring_thread and self._ring_thread.is_alive():
             return
         self._ring_thread = threading.Thread(target=self._ring_loop, daemon=True)
+        self._ring_thread.start()
+
+    def ring_pattern(self, bursts: list[tuple[int, int]]) -> None:
+        """One-shot alert (e.g. SMS double-ring). Does not loop."""
+        if self.is_off_hook() or not bursts:
+            return
+        self._ring_stop.clear()
+        if self._ring_thread and self._ring_thread.is_alive():
+            self.ring_stop()
+            # Brief yield so the prior loop can exit before we reuse the pin.
+            time.sleep(0.05)
+        self._ring_stop.clear()
+        pattern = [(max(0, int(on)), max(0, int(off))) for on, off in bursts]
+        self._ring_thread = threading.Thread(
+            target=self._ring_pattern_loop,
+            args=(pattern,),
+            daemon=True,
+        )
         self._ring_thread.start()
 
     def ring_stop(self) -> None:
@@ -398,3 +439,46 @@ class GpioPhone(PhoneIO):
                 else:
                     off_hook_since = None
                 time.sleep(poll)
+
+    def _ring_pattern_loop(self, bursts: list[tuple[int, int]]) -> None:
+        """Play ``bursts`` once then stop (SMS-style alert)."""
+        poll = self.profile.ring.poll_hook_while_ringing_ms / 1000.0
+        off_hook_need_s = max(0.1, self.profile.ring.poll_hook_while_ringing_ms * 2 / 1000.0)
+        off_hook_since: float | None = None
+        for on_ms, off_ms in bursts:
+            if self._ring_stop.is_set():
+                break
+            if on_ms > 0:
+                self._ring.on()  # type: ignore[union-attr]
+                deadline = time.monotonic() + on_ms / 1000.0
+                while time.monotonic() < deadline:
+                    if self._ring_stop.is_set():
+                        self.ring_stop()
+                        return
+                    if self.is_off_hook():
+                        if off_hook_since is None:
+                            off_hook_since = time.monotonic()
+                        elif time.monotonic() - off_hook_since >= off_hook_need_s:
+                            self.ring_stop()
+                            return
+                    else:
+                        off_hook_since = None
+                    time.sleep(poll)
+                self._ring.off()  # type: ignore[union-attr]
+            if off_ms <= 0 or self._ring_stop.is_set():
+                continue
+            deadline = time.monotonic() + off_ms / 1000.0
+            while time.monotonic() < deadline:
+                if self._ring_stop.is_set():
+                    self.ring_stop()
+                    return
+                if self.is_off_hook():
+                    if off_hook_since is None:
+                        off_hook_since = time.monotonic()
+                    elif time.monotonic() - off_hook_since >= off_hook_need_s:
+                        self.ring_stop()
+                        return
+                else:
+                    off_hook_since = None
+                time.sleep(poll)
+        self.ring_stop()

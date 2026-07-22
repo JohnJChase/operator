@@ -48,7 +48,7 @@ def test_digit_zero_menu_mentions_meeting_and_desk():
     r = handle_digit(0)
     assert "7 to join a meeting" in r.text
     assert "8 for the information desk" in r.text
-    assert "5 for voicemail" in r.text
+    assert "5 for messages" in r.text
 
 
 def test_digit_zero_menu_mentions_weather_radio():

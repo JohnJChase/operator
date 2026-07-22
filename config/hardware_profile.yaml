@@ -144,6 +144,14 @@ timing:
   inbound_ring_timeout_ms: 25000
   # After miss: greet + record window (pjsua conference WAV; handset mic muted).
   voicemail_record_ms: 30000
+  # Audible MWI: stutter dial tone length before continuous dial (SMS or VM waiting).
+  mwi_stutter_ms: 2500
+  # After inbox item hint: wait this long for hook flash (reply / callback).
+  inbox_flash_wait_ms: 15000
+  # SMS alert: one quick double-ring, then quiet pickup window (else queue for digit 5).
+  sms_pickup_window_ms: 30000
+  sms_double_on_ms: 400
+  sms_double_gap_ms: 200
 safety:
   ring_gpio_fails_off: true
   ring_while_off_hook_allowed: false

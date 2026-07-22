@@ -40,9 +40,10 @@ OPERATOR_SMS_WEBHOOK_PORT=8787
 
 ## Behavior
 
-- **Inbound:** webhook upserts row (idempotent on Telnyx message id). If the phone is on-hook idle → ring; answer → speak “Message from …”; no answer → stay queued. Busy (off-hook / SIP / desk) → queue only.
+- **Inbound:** webhook upserts row (idempotent on Telnyx message id). If the phone is on-hook idle → **quick double-ring**, then a quiet pickup window (`sms_pickup_window_ms`, default 30s). Answer in that window → speak “Message from …”, then “Flash to reply, or hang up.” (dictate → hear draft → flash to send). Miss the window → stay queued for digit **5**. Busy (off-hook / SIP / desk) → queue only.
 - **Outbound:** info desk `prepare_message(to, text)` → `confirm_message(true)` → Telnyx send. Bodies are not written to EventLog JSONL.
-- **Menu:** digit 0 mentions unheard count when any exist.
+- **MWI:** any unheard SMS or voicemail → stutter dial tone on off-hook (`timing.mwi_stutter_ms`), then continuous dial.
+- **Menu:** digit 0 says “N waiting messages” (SMS+VM) and “dial 5 for messages.” Digit **5** is the universal inbox (SMS + voicemail, oldest first); after each SMS, same flash-to-reply flow.
 - Desk tools: `list_messages`, `read_message`.
 
 ## Local test (no Telnyx)
