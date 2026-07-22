@@ -1,9 +1,10 @@
 """Off-hook handset bridge: virtual SIP line (snd-aloop) ↔ USB cradle.
 
 Architecture:
-  Softphone (pjsua) always opens the Loopback card — never the handset.
-  On-hook features (voicemail) use that line alone; the cradle stays dark.
-  Only a live call starts ``alsaloop`` to join Loopback ↔ ``plughw`` handset.
+  Softphone opens Loopback. Live SIP_CALL patch starts alsaloop (one-way legs
+  as a pair today). Plant cordboard owns when the bridge is up — see plant.py.
+  ATR2x electrically loops speaker→mic; HandsetSipGuard lowers capture when
+  both legs are live (no Meet-specific mute timers).
 """
 
 from __future__ import annotations
@@ -62,6 +63,8 @@ def write_sip_line_asoundrc(home: Path, *, loopback_card: str | None = None) -> 
 
     Playback → Loopback,0,0 ; capture ← Loopback,1,1 (second cable of the pair).
     The handset bridge uses the opposite ends of those cables.
+
+    Used for inbound / voicemail so the cradle stays dark until we bridge.
     """
     card = loopback_card or ensure_loopback_card()
     (home / ".asoundrc").write_text(
@@ -93,13 +96,181 @@ def write_sip_line_asoundrc(home: Path, *, loopback_card: str | None = None) -> 
     return card
 
 
+def write_handset_asoundrc(home: Path, handset_alsa: str) -> None:
+    """Point pjsua default PCM at the USB cradle (outbound live calls).
+
+    Avoids alsaloop: ATR2x full-speed USB underruns Loopback↔plughw hard enough
+    that Meet audio arrives on the SIP line but the earpiece stays silent.
+
+    Playback and capture are separate asym slaves (same device). The ATR2x still
+    electrically mixes speaker→mic when both are open — see ``HandsetSipGuard``.
+    """
+    dev = (handset_alsa or "plughw:2,0").strip() or "plughw:2,0"
+    (home / ".asoundrc").write_text(
+        "\n".join(
+            [
+                "# operator-os: outbound SIP on USB handset (no alsaloop)",
+                "pcm.!default {",
+                "  type asym",
+                '  playback.pcm "handset"',
+                '  capture.pcm "handset"',
+                "}",
+                "pcm.handset {",
+                "  type plug",
+                f'  slave.pcm "{dev}"',
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def alsa_card_from_device(handset_alsa: str) -> str:
+    """``plughw:2,0`` / ``hw:ATR2xUSB,0`` → card id for amixer."""
+    m = re.match(r"(?:plug)?hw:([^,]+)", (handset_alsa or "").strip())
+    return m.group(1) if m else "2"
+
+
+@dataclass
+class HandsetSipGuard:
+    """ATR2x TX hygiene for outbound SIP.
+
+    The adapter feeds speaker into mic at near full scale when capture gain is
+    maxed (not acoustic bleed — digital/electrical). Lower capture for the call,
+    force mic-playback off, and optionally mute TX while Meet plays join IVR.
+    """
+
+    handset_alsa: str = "plughw:2,0"
+    capture_level: int = 12  # ALSA Mic capture 0–30; 30 loops Meet into the room
+    _card: str = field(init=False, repr=False)
+    _saved_capture: int | None = field(default=None, init=False, repr=False)
+    _saved_cap_on: bool | None = field(default=None, init=False, repr=False)
+    _saved_play_on: bool | None = field(default=None, init=False, repr=False)
+    _unmute_timer: threading.Timer | None = field(default=None, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._card = alsa_card_from_device(self.handset_alsa)
+
+    def arm(self) -> None:
+        """Save mixer; mic-playback off; drop capture gain."""
+        with self._lock:
+            self._cancel_unmute_locked()
+            self._saved_capture = self._get_capture_level()
+            self._saved_cap_on = self._get_switch("capture")
+            self._saved_play_on = self._get_switch("playback")
+            self._amixer("sset", "Mic", "playback", "off")
+            level = max(0, min(30, int(self.capture_level)))
+            self._amixer("sset", "Mic", "capture", str(level))
+            self._amixer("sset", "Mic", "cap")
+
+    def mute_tx(self) -> None:
+        with self._lock:
+            self._cancel_unmute_locked()
+            self._amixer("sset", "Mic", "nocap")
+
+    def unmute_tx_after(self, seconds: float) -> None:
+        """Keep TX muted, then unmute (Meet join announcements)."""
+        with self._lock:
+            self._cancel_unmute_locked()
+            self._amixer("sset", "Mic", "nocap")
+            delay = max(0.0, float(seconds))
+            if delay <= 0:
+                self._amixer("sset", "Mic", "cap")
+                return
+            t = threading.Timer(delay, self._unmute_tx_safe)
+            t.daemon = True
+            t.start()
+            self._unmute_timer = t
+
+    def release(self) -> None:
+        """Restore mixer (call from hangup)."""
+        with self._lock:
+            self._cancel_unmute_locked()
+            if self._saved_capture is not None:
+                self._amixer("sset", "Mic", "capture", str(self._saved_capture))
+            if self._saved_cap_on is True:
+                self._amixer("sset", "Mic", "cap")
+            elif self._saved_cap_on is False:
+                self._amixer("sset", "Mic", "nocap")
+            if self._saved_play_on is True:
+                self._amixer("sset", "Mic", "playback", "on")
+            elif self._saved_play_on is False:
+                self._amixer("sset", "Mic", "playback", "off")
+            self._saved_capture = None
+            self._saved_cap_on = None
+            self._saved_play_on = None
+
+    def _unmute_tx_safe(self) -> None:
+        with self._lock:
+            self._unmute_timer = None
+            self._amixer("sset", "Mic", "cap")
+
+    def _cancel_unmute_locked(self) -> None:
+        t = self._unmute_timer
+        self._unmute_timer = None
+        if t is not None:
+            t.cancel()
+
+    def _amixer(self, *args: str) -> None:
+        try:
+            subprocess.run(
+                ["amixer", "-c", self._card, *args],
+                check=False,
+                capture_output=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    def _get_capture_level(self) -> int | None:
+        try:
+            out = subprocess.run(
+                ["amixer", "-c", self._card, "sget", "Mic"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            ).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        # Mono: Playback … Capture 30 [100%] [33.00dB] [on]
+        m = re.search(r"Capture\s+(\d+)\s+\[", out)
+        return int(m.group(1)) if m else None
+
+    def _get_switch(self, which: str) -> bool | None:
+        """which = capture|playback → True if unmuted/on."""
+        try:
+            out = subprocess.run(
+                ["amixer", "-c", self._card, "sget", "Mic"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            ).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if which == "playback":
+            m = re.search(
+                r"Playback\s+\d+\s+\[[^\]]+\]\s+\[[^\]]+\]\s+\[(on|off)\]", out
+            )
+            return m.group(1) == "on" if m else None
+        m = re.search(
+            r"Capture\s+\d+\s+\[[^\]]+\]\s+\[[^\]]+\]\s+\[(on|off)\]", out
+        )
+        return m.group(1) == "on" if m else None
+
+
 @dataclass
 class HandsetBridge:
-    """alsaloop jobs joining virtual line ↔ USB handset. Off-hook / live SIP only."""
+    """alsaloop jobs joining virtual line ↔ USB handset. Inbound live answer only."""
 
     handset_alsa: str = "plughw:2,0"
     loopback_card: str | None = None
     rate: int = 8000
+    # 100ms — ATR2x full-speed can't sustain 20ms without underrun silence.
+    latency_us: int = 100_000
     _procs: list[subprocess.Popen[bytes]] = field(default_factory=list, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
@@ -115,6 +286,7 @@ class HandsetBridge:
             card = self.loopback_card or ensure_loopback_card()
             self.loopback_card = card
             handset = self.handset_alsa
+            lat = str(self.latency_us)
             # Cable A: softphone play (0,0) → capture (1,0) → handset speaker
             # Cable B: handset mic → play (0,1) → softphone capture (1,1)
             jobs = [
@@ -131,7 +303,7 @@ class HandsetBridge:
                     "-f",
                     "S16_LE",
                     "-t",
-                    "20000",
+                    lat,
                     "-n",
                     "-S",
                     "1",
@@ -149,7 +321,7 @@ class HandsetBridge:
                     "-f",
                     "S16_LE",
                     "-t",
-                    "20000",
+                    lat,
                     "-n",
                     "-S",
                     "1",

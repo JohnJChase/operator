@@ -30,6 +30,18 @@ class MeetDialIn:
     e164: str
     pin: str = ""
     event_id: str = ""
+    conference_id: str = ""
+    ical_uid: str = ""
+    self_rsvp: str = ""  # accepted | tentative | declined | needsAction | ""
+
+
+@dataclass(frozen=True)
+class JoinDecision:
+    """Digit-7 outcome: join one meeting, offer a dial menu, or refuse."""
+
+    meeting: MeetDialIn | None = None
+    choices: tuple[MeetDialIn, ...] = ()
+    reason: str = ""
 
 
 def client_id() -> str:
@@ -105,30 +117,78 @@ def _get_json(url: str, token: str) -> dict[str, Any]:
         raise RuntimeError(f"Calendar network error: {e}") from e
 
 
+def list_my_meeting_calendar_ids(*, limit: int = 12) -> list[str]:
+    """Calendars to scan for digit 7: primary + selected calendars you own.
+
+    Do not include every readable calendar — Google Calendar List is full of
+    coworkers' calendars that happen to be shared with you.
+    """
+    token = access_token()
+    url = f"{CAL_API}/users/me/calendarList?{urlencode({'minAccessRole': 'reader'})}"
+    data = _get_json(url, token)
+    ids: list[str] = []
+    seen: set[str] = set()
+    for item in data.get("items") or []:
+        cid = (item.get("id") or "").strip()
+        if not cid or cid in seen:
+            continue
+        primary = item.get("primary") is True
+        selected = item.get("selected") is True
+        owner = (item.get("accessRole") or "") == "owner"
+        if not (primary or (selected and owner)):
+            continue
+        seen.add(cid)
+        ids.append(cid)
+        if len(ids) >= limit:
+            break
+    return ids or [calendar_id()]
+
+
+def calendars_to_query() -> list[str]:
+    """Explicit ids, else a pinned GOOGLE_CALENDAR_ID, else primary + owned selected."""
+    raw = os.environ.get("GOOGLE_CALENDAR_IDS", "").strip()
+    if raw:
+        return [p.strip() for p in raw.split(",") if p.strip()]
+    if os.environ.get("GOOGLE_CALENDAR_ID", "").strip():
+        return [calendar_id()]
+    try:
+        return list_my_meeting_calendar_ids()
+    except Exception:
+        return [calendar_id()]
+
+
 def list_events_around_now(
     *,
     lookback_min: int = 15,
     lookahead_min: int = 30,
     max_results: int = 10,
 ) -> list[dict[str, Any]]:
-    """Primary calendar events overlapping [now-lookback, now+lookahead]."""
+    """Events overlapping [now-lookback, now+lookahead] across configured calendars."""
     token = access_token()
     now = datetime.now(timezone.utc)
     time_min = (now - timedelta(minutes=lookback_min)).isoformat().replace("+00:00", "Z")
     time_max = (now + timedelta(minutes=lookahead_min)).isoformat().replace("+00:00", "Z")
-    q = urlencode(
-        {
-            "timeMin": time_min,
-            "timeMax": time_max,
-            "singleEvents": "true",
-            "orderBy": "startTime",
-            "maxResults": str(max_results),
-            "conferenceDataVersion": "1",
-        }
-    )
-    url = f"{CAL_API}/calendars/{quote(calendar_id(), safe='')}/events?{q}"
-    data = _get_json(url, token)
-    return list(data.get("items") or [])
+    base = {
+        "timeMin": time_min,
+        "timeMax": time_max,
+        "singleEvents": "true",
+        "orderBy": "startTime",
+        "maxResults": str(max_results),
+        "conferenceDataVersion": "1",
+    }
+    items: list[dict[str, Any]] = []
+    for cid in calendars_to_query():
+        q = urlencode(base)
+        url = f"{CAL_API}/calendars/{quote(cid, safe='')}/events?{q}"
+        data = _get_json(url, token)
+        items.extend(list(data.get("items") or []))
+    # Stable order by start time when present.
+    def _start_key(ev: dict[str, Any]) -> str:
+        start = ev.get("start") or {}
+        return str(start.get("dateTime") or start.get("date") or "")
+
+    items.sort(key=_start_key)
+    return items
 
 
 def _e164_from_tel_uri(uri: str) -> tuple[str, str]:
@@ -250,58 +310,170 @@ def fetch_us_meet_number(more_uri: str) -> str:
     return us_e164_from_tel_meet_html(html)
 
 
-def extract_meet_dial_in(event: dict[str, Any]) -> MeetDialIn | None:
-    """Pick a Meet phone dial-in; always prefer a US number when possible."""
+def _conference_id(event: dict[str, Any]) -> str:
+    conf = event.get("conferenceData") or {}
+    cid = (conf.get("conferenceId") or "").strip()
+    if cid:
+        return cid
+    for ep in conf.get("entryPoints") or []:
+        if (ep.get("entryPointType") or "").lower() != "video":
+            continue
+        uri = (ep.get("uri") or "").strip()
+        if "meet.google.com/" in uri:
+            return uri.rstrip("/").rsplit("/", 1)[-1]
+    return ""
+
+
+def _self_rsvp(event: dict[str, Any]) -> str:
+    """Caller's RSVP on this event (accepted / tentative / declined / needsAction)."""
+    for att in event.get("attendees") or []:
+        if att.get("self"):
+            return (att.get("responseStatus") or "").strip().lower()
+    if (event.get("organizer") or {}).get("self"):
+        return "accepted"
+    return ""
+
+
+def extract_meet_dial_in(
+    event: dict[str, Any],
+    *,
+    fetch_us: bool = True,
+) -> MeetDialIn | None:
+    """Pick a Meet phone dial-in; prefer a US number when present or fetchable.
+
+    Set ``fetch_us=False`` when scanning many events (digit-7 menu) — hitting
+    tel.meet per event blocks the handset for tens of seconds. Call
+    ``ensure_us_dial_in`` once a meeting is chosen.
+    """
     title = (event.get("summary") or "Meeting").strip()
     candidates = _phone_candidates(event)
     if not candidates:
         return None
     pin = _meet_pin(event) or next((c[1] for c in candidates if c[1]), "")
+    meta = dict(
+        title=title,
+        pin=pin,
+        event_id=str(event.get("id") or ""),
+        conference_id=_conference_id(event),
+        ical_uid=str(event.get("iCalUID") or ""),
+        self_rsvp=_self_rsvp(event),
+    )
     us = [c for c in candidates if c[2]]
     if us:
         e164, _, _ = us[0]
-        return MeetDialIn(
-            title=title,
-            e164=e164,
-            pin=pin,
-            event_id=str(event.get("id") or ""),
-        )
-    # Calendar API often returns only the organizer region (e.g. GB). The `more`
-    # / tel.meet page lists every country — pull United States from there.
-    us_e164 = fetch_us_meet_number(_more_tel_uri(event))
-    if us_e164:
-        return MeetDialIn(
-            title=title,
-            e164=us_e164,
-            pin=pin,
-            event_id=str(event.get("id") or ""),
-        )
+        return MeetDialIn(e164=e164, **meta)
+    if fetch_us:
+        # Calendar API often returns only the organizer region (e.g. GB).
+        us_e164 = fetch_us_meet_number(_more_tel_uri(event))
+        if us_e164:
+            return MeetDialIn(e164=us_e164, **meta)
     e164, _, _ = candidates[0]
+    return MeetDialIn(e164=e164, **meta)
+
+
+def ensure_us_dial_in(dial: MeetDialIn) -> MeetDialIn:
+    """Resolve a US PSTN number for a chosen Meet (one network fetch)."""
+    if (dial.e164 or "").startswith("+1"):
+        return dial
+    uri = ""
+    if dial.conference_id:
+        uri = f"https://tel.meet/{dial.conference_id}"
+    if not uri:
+        return dial
+    us = fetch_us_meet_number(uri)
+    if not us:
+        return dial
     return MeetDialIn(
-        title=title,
-        e164=e164,
-        pin=pin,
-        event_id=str(event.get("id") or ""),
+        title=dial.title,
+        e164=us,
+        pin=dial.pin,
+        event_id=dial.event_id,
+        conference_id=dial.conference_id,
+        ical_uid=dial.ical_uid,
+        self_rsvp=dial.self_rsvp,
     )
+
+
+def _dedupe_key(dial: MeetDialIn) -> str:
+    """Identity for the same Meet across calendars."""
+    if dial.conference_id:
+        return f"conf:{dial.conference_id.lower()}"
+    if dial.e164 and dial.pin:
+        return f"dial:{dial.e164}:{dial.pin}"
+    if dial.ical_uid:
+        return f"ical:{dial.ical_uid}"
+    if dial.e164:
+        return f"dial:{dial.e164}"
+    return f"id:{dial.event_id}"
+
+
+def _rsvp_rank(status: str) -> int:
+    # Higher = prefer when merging duplicate calendar copies.
+    return {
+        "accepted": 3,
+        "tentative": 2,
+        "needsaction": 1,
+        "": 1,
+        "declined": 0,
+    }.get((status or "").lower(), 1)
+
+
+def dedupe_meetings(dials: list[MeetDialIn]) -> list[MeetDialIn]:
+    """Collapse the same Meet copied onto multiple calendars."""
+    best: dict[str, MeetDialIn] = {}
+    order: list[str] = []
+    for dial in dials:
+        key = _dedupe_key(dial)
+        prev = best.get(key)
+        if prev is None:
+            best[key] = dial
+            order.append(key)
+            continue
+        if _rsvp_rank(dial.self_rsvp) > _rsvp_rank(prev.self_rsvp):
+            best[key] = dial
+        elif _rsvp_rank(dial.self_rsvp) == _rsvp_rank(prev.self_rsvp) and len(
+            dial.title
+        ) > len(prev.title):
+            best[key] = dial
+    return [best[k] for k in order]
 
 
 def find_joinable_meetings() -> list[MeetDialIn]:
     out: list[MeetDialIn] = []
     for ev in list_events_around_now():
-        dial = extract_meet_dial_in(ev)
+        # No per-event tel.meet fetch — that hung digit 7 on the handset.
+        dial = extract_meet_dial_in(ev, fetch_us=False)
         if dial is not None:
             out.append(dial)
-    return out
+    # Skip meetings the caller already declined.
+    return [m for m in dedupe_meetings(out) if m.self_rsvp != "declined"]
+
+
+def resolve_meeting_to_join(*, max_choices: int = 9) -> JoinDecision:
+    """Pick one Meet, or a dial-choice list when several unique dial-ins remain."""
+    found = find_joinable_meetings()
+    if not found:
+        return JoinDecision(reason="No meeting with a phone dial-in was found.")
+    if len(found) == 1:
+        return JoinDecision(meeting=found[0])
+    accepted = [m for m in found if m.self_rsvp == "accepted"]
+    if len(accepted) == 1:
+        return JoinDecision(meeting=accepted[0])
+    choices = tuple(found[: max(1, min(max_choices, 9))])
+    return JoinDecision(choices=choices)
 
 
 def pick_meeting_to_join() -> tuple[MeetDialIn | None, str]:
-    """Return (meeting, reason). reason is empty on success."""
-    found = find_joinable_meetings()
-    if not found:
-        return None, "No meeting with a phone dial-in was found."
-    if len(found) > 1:
-        return None, "Several meetings have dial-in numbers. Join from the calendar."
-    return found[0], ""
+    """Return (meeting, reason). reason is empty on success.
+
+    Prefer ``resolve_meeting_to_join`` when a dial menu is needed.
+    """
+    decision = resolve_meeting_to_join()
+    if decision.meeting is not None:
+        return decision.meeting, ""
+    if decision.choices:
+        return None, "Several meetings have dial-in numbers. Dial seven again after choosing."
+    return None, decision.reason or "No meeting found."
 
 
 def run_calendar_auth(*, open_browser: bool = True) -> int:

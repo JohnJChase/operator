@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,7 +29,8 @@ For voicemail use list_voicemails / play_voicemail / delete_voicemail / callback
 Outside line and messages require prepare then confirm."""
 
 GREETING = "Information."
-MAX_RECORD_S = 8.0
+MAX_RECORD_S = 6.0
+SILENCE_END_MS = 700
 MAX_TURNS = 8
 
 
@@ -84,16 +84,21 @@ class InfoDeskSession:
             for _ in range(MAX_TURNS):
                 if self.cancel.is_set() or self.audio.is_on_hook:
                     return
-                # Open mic for the next question (plant already seized on digit).
                 text = self._listen_once(key)
                 if self.cancel.is_set() or self.audio.is_on_hook:
+                    self.audio.stop()
                     return
                 if not text:
+                    self.audio.stop()
                     self.audio.speak("I did not catch that.", wait=True)
                     continue
                 self.events.emit("info_desk", value="heard", detail=text[:120])
+                print(f"info_desk: heard {text[:80]!r}", flush=True)
                 messages.append({"role": "user", "content": text})
-                reply = self._complete(messages, key)
+                try:
+                    reply = self._complete(messages, key)
+                finally:
+                    self.audio.stop()
                 if self.cancel.is_set() or self.audio.is_on_hook:
                     return
                 if reply:
@@ -102,6 +107,7 @@ class InfoDeskSession:
                 if self.tools.line_seized:
                     return
         except Exception as e:
+            self.audio.stop()
             self.events.emit("info_desk", value="error", detail=str(e)[:120])
             if not self.audio.is_on_hook and not self.cancel.is_set():
                 try:
@@ -113,16 +119,24 @@ class InfoDeskSession:
         with tempfile.TemporaryDirectory(prefix="operator-desk-") as tmp:
             wav = Path(tmp) / "utterance.wav"
             try:
-                self.audio.record(MAX_RECORD_S, wav)
+                self.audio.record_utterance(
+                    wav,
+                    max_s=MAX_RECORD_S,
+                    silence_end_ms=SILENCE_END_MS,
+                )
             except RuntimeError:
                 return ""
             if self.cancel.is_set() or self.audio.is_on_hook:
                 return ""
             if not wav.is_file() or wav.stat().st_size < 1000:
                 return ""
+            # Hold chime covers STT + tool chat until we speak the answer.
+            self.audio.play_thinking()
+            self.events.emit("info_desk", value="thinking")
             try:
                 return transcribe_wav(wav, api_key)
             except Exception as e:
+                self.audio.stop()
                 self.events.emit("info_desk", value="stt_error", detail=str(e)[:120])
                 return ""
 

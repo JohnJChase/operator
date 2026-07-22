@@ -17,10 +17,12 @@ HookCallback = Callable[[bool], None]
 
 @dataclass
 class HookFlashClassifier:
-    """Split cradle dips into flash / double-flash / hangup using profile timings.
+    """Split cradle dips into chart events using profile timings.
 
-    While the cradle is down we wait: a short return to off-hook is a flash
-    (audio stays up). Staying down past hangup_min is a real hangup.
+    Cradle down emits ``cradle_down`` immediately (plant goes HOOK_PENDING /
+    silence). Discrimination happens after the cut: short lift → flash;
+    bounce → cradle_bounce (resume without session skip); stay down past
+    hangup_min → on_hook.
     """
 
     flash_min_s: float
@@ -41,19 +43,17 @@ class HookFlashClassifier:
         )
 
     def feed(self, off_hook: bool, *, now: float | None = None) -> list[str]:
-        """Consume a raw hook edge. Returns event names: off_hook, hook_flash, hook_flash_2."""
+        """Raw hook edge → cradle_down / off_hook / hook_flash / cradle_bounce / on_hook."""
         t = time.monotonic() if now is None else now
         out: list[str] = []
         if off_hook:
             if self._pending_onhook_at is None:
-                # Already off-hook or first lift; still announce off_hook for FSM.
                 out.append("off_hook")
                 self._hangup_emitted = False
                 return out
             dt = t - self._pending_onhook_at
             self._pending_onhook_at = None
             if self._hangup_emitted:
-                # Hangup already fired while cradle was down; this is a new lift.
                 self._hangup_emitted = False
                 out.append("off_hook")
                 return out
@@ -68,19 +68,17 @@ class HookFlashClassifier:
                 self._last_flash_at = t
                 return out
             if dt < self.flash_min_s:
-                # Bounce — ignore.
-                return out
-            # Longer than flash_max but hangup poll hasn't fired yet: treat as hangup
-            # then immediate off_hook so the line recovers.
+                # Contact bounce while intending to stay off-hook: resume only.
+                return ["cradle_bounce"]
             out.append("on_hook")
             out.append("off_hook")
             self._hangup_emitted = False
             return out
 
-        # Going on-hook: start timing; hangup comes from poll() if they stay down.
+        # Going on-hook: cut now; hangup comes from poll() if they stay down.
         self._pending_onhook_at = t
         self._hangup_emitted = False
-        return out
+        return ["cradle_down"]
 
     def poll(self, *, on_hook: bool, now: float | None = None) -> list[str]:
         """While cradle is down, emit on_hook once hangup_min elapses."""

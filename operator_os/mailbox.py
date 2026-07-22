@@ -17,7 +17,10 @@ from operator_os.audio import AudioRouter
 from operator_os.events import EventLog
 
 RECORD_S = 8.0
-DEFAULT_FLASH_WAIT_S = 15.0
+# Short offer after each inbox item — no flash → next message (no long stall).
+DEFAULT_HINT_WAIT_S = 2.5
+# Once the user starts a reply, wait longer for record-end / confirm flashes.
+DEFAULT_CONFIRM_WAIT_S = 15.0
 
 
 def _wait_event(
@@ -81,7 +84,7 @@ class SmsReplySession:
     """Live or inbox SMS reply: flash → record → flash → send.
 
     Phases (flash advances only the current one):
-      hint     — waiting to start recording
+      hint     — short offer; timeout skips quietly (inbox continues)
       record   — flash ends recording early
       confirm  — waiting to send
     """
@@ -89,7 +92,8 @@ class SmsReplySession:
     audio: AudioRouter
     events: EventLog
     to_e164: str
-    flash_wait_s: float = DEFAULT_FLASH_WAIT_S
+    hint_wait_s: float = DEFAULT_HINT_WAIT_S
+    confirm_wait_s: float = DEFAULT_CONFIRM_WAIT_S
     cancel: threading.Event = field(default_factory=threading.Event, init=False)
     _phase: str = field(default="hint", init=False, repr=False)
     _go: threading.Event = field(default_factory=threading.Event, init=False)
@@ -134,13 +138,11 @@ class SmsReplySession:
             self.audio.speak("Could not send.", wait=True)
             return
 
-        # --- hint ---
+        # --- hint (short; timeout = skip reply, no lecture) ---
         self._phase = "hint"
         self._go.clear()
-        self.audio.speak("Flash to reply, or hang up.", wait=True)
-        if not _wait_event(self._go, self.cancel, self.flash_wait_s):
-            if not self.cancel.is_set():
-                self.audio.speak("Cancelled.", wait=True)
+        self.audio.speak("Flash to reply.", wait=True)
+        if not _wait_event(self._go, self.cancel, self.hint_wait_s):
             return
 
         # --- record ---
@@ -180,7 +182,7 @@ class SmsReplySession:
         self._phase = "confirm"
         self._go.clear()
         self.audio.speak(f"Reply: {text}. Flash to send, or hang up.", wait=True)
-        if not _wait_event(self._go, self.cancel, self.flash_wait_s):
+        if not _wait_event(self._go, self.cancel, self.confirm_wait_s):
             if not self.cancel.is_set():
                 self.audio.speak("Cancelled.", wait=True)
             return
@@ -196,7 +198,8 @@ class SmsReplySession:
 class InboxSession:
     audio: AudioRouter
     events: EventLog
-    flash_wait_s: float = DEFAULT_FLASH_WAIT_S
+    hint_wait_s: float = DEFAULT_HINT_WAIT_S
+    confirm_wait_s: float = DEFAULT_CONFIRM_WAIT_S
     request_callback: Callable[[str], None] | None = None
     cancel: threading.Event = field(default_factory=threading.Event, init=False)
     _phase: str = field(default="idle", init=False, repr=False)
@@ -273,7 +276,8 @@ class InboxSession:
                     audio=self.audio,
                     events=self.events,
                     to_e164=item.from_e164,
-                    flash_wait_s=self.flash_wait_s,
+                    hint_wait_s=self.hint_wait_s,
+                    confirm_wait_s=self.confirm_wait_s,
                 )
                 self._reply.start()
                 self._reply.wait_done()
@@ -301,8 +305,8 @@ class InboxSession:
                 continue
             self._phase = "callback"
             self._go.clear()
-            self.audio.speak("Flash to call back, or hang up.", wait=True)
-            if not _wait_event(self._go, self.cancel, self.flash_wait_s):
+            self.audio.speak("Flash to call back.", wait=True)
+            if not _wait_event(self._go, self.cancel, self.hint_wait_s):
                 continue
             if self.cancel.is_set():
                 return
@@ -323,13 +327,15 @@ def start_mailbox(
     audio: AudioRouter,
     events: EventLog,
     *,
-    flash_wait_s: float = DEFAULT_FLASH_WAIT_S,
+    hint_wait_s: float = DEFAULT_HINT_WAIT_S,
+    confirm_wait_s: float = DEFAULT_CONFIRM_WAIT_S,
     request_callback: Callable[[str], None] | None = None,
 ) -> InboxSession:
     session = InboxSession(
         audio=audio,
         events=events,
-        flash_wait_s=flash_wait_s,
+        hint_wait_s=hint_wait_s,
+        confirm_wait_s=confirm_wait_s,
         request_callback=request_callback,
     )
     session.start()
@@ -341,13 +347,15 @@ def start_sms_reply(
     events: EventLog,
     to_e164: str,
     *,
-    flash_wait_s: float = DEFAULT_FLASH_WAIT_S,
+    hint_wait_s: float = DEFAULT_HINT_WAIT_S,
+    confirm_wait_s: float = DEFAULT_CONFIRM_WAIT_S,
 ) -> SmsReplySession:
     session = SmsReplySession(
         audio=audio,
         events=events,
         to_e164=to_e164,
-        flash_wait_s=flash_wait_s,
+        hint_wait_s=hint_wait_s,
+        confirm_wait_s=confirm_wait_s,
     )
     session.start()
     return session

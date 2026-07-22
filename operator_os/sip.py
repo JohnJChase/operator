@@ -134,13 +134,18 @@ def _resolve_pjsua(pjsua_path: Path = DEFAULT_PJSUA) -> Path:
     )
 
 
-def _write_asoundrc(home: Path, device: str) -> None:
-    """Deprecated handset default — SIP uses ``write_sip_line_asoundrc`` instead."""
-    from operator_os.handset_bridge import write_sip_line_asoundrc
+def _write_asoundrc(home: Path, device: str, *, sound: str = "loopback") -> None:
+    """Per-process ``~/.asoundrc`` for pjsua.
 
-    # Ignore handset device string; softphone always sits on snd-aloop.
-    del device
-    write_sip_line_asoundrc(home)
+    Softphone stays on Loopback; plant jumpers join the handset for live calls.
+    ``sound="handset"`` remains for diagnostics only.
+    """
+    from operator_os.handset_bridge import write_handset_asoundrc, write_sip_line_asoundrc
+
+    if sound == "handset":
+        write_handset_asoundrc(home, device)
+    else:
+        write_sip_line_asoundrc(home)
 
 
 def _telnyx_reject_message(log_text: str) -> str | None:
@@ -161,11 +166,10 @@ def _telnyx_reject_message(log_text: str) -> str | None:
 
 
 def _pjsua_media_args(*, null_audio: bool) -> list[str]:
-    """Shared media flags for the virtual SIP line (snd-aloop via asoundrc).
+    """Shared media flags; ALSA device comes from per-process ``~/.asoundrc``.
 
-    Softphone never opens the USB handset. Default devices (-1) use the
-    per-process ``~/.asoundrc`` from ``write_sip_line_asoundrc``. Handset joins
-    only via ``HandsetBridge`` (alsaloop) while a live call is up.
+    Inbound uses Loopback (+ optional HandsetBridge). Outbound uses handset
+    asoundrc directly — see ``_write_asoundrc``.
     """
     if null_audio:
         return [
@@ -306,6 +310,7 @@ class _PjsuaProc:
     alsa_device: str = "plughw:2,0"
     pjsua_path: Path = field(default_factory=lambda: DEFAULT_PJSUA)
     null_audio: bool = False
+    sound: str = "loopback"  # "loopback" | "handset"
     _proc: subprocess.Popen[bytes] | None = field(default=None, init=False, repr=False)
     _master: int | None = field(default=None, init=False, repr=False)
     _home: Path | None = field(default=None, init=False, repr=False)
@@ -321,7 +326,7 @@ class _PjsuaProc:
             if self._proc is not None:
                 return
             self._home = Path(tempfile.mkdtemp(prefix="operator-sip-"))
-            _write_asoundrc(self._home, self.alsa_device)
+            _write_asoundrc(self._home, self.alsa_device, sound=self.sound)
             self._log_path = self._home / "pjsua.log"
             self._log_fp = open(self._log_path, "w", encoding="utf-8")
             self._log_text = ""
@@ -486,6 +491,9 @@ class SipCallSession:
     Outbound-only: no REGISTER (Telnyx rejects REGISTER when ``--id`` is the
     caller-ID number, and rejects INVITE when ``--id`` is the SIP username).
     Auth is digest on the INVITE via ``--outbound``.
+
+    Plant chooses attach mode: ``sound="handset"`` for outbound (ATR2x cannot
+    run alsaloop reliably); inbound live answer keeps Loopback + bridge.
     """
 
     e164: str
@@ -495,6 +503,7 @@ class SipCallSession:
     progress_timeout_s: float = 5.0
     null_audio: bool = False
     dtmf_after_confirm: str = ""
+    sound: str = "handset"
     _pj: _PjsuaProc | None = field(default=None, init=False, repr=False)
     _log_mark: int = field(default=0, init=False, repr=False)
 
@@ -503,11 +512,19 @@ class SipCallSession:
             raise RuntimeError(
                 "TELNYX_CALLER_ID is required (Telnyx number for outbound caller ID)"
             )
+        try:
+            self._start_pjsua()
+        except Exception:
+            self.hangup()
+            raise
+
+    def _start_pjsua(self) -> None:
         pj = _PjsuaProc(
             credentials=self.credentials,
             alsa_device=self.alsa_device,
             pjsua_path=self.pjsua_path,
             null_audio=self.null_audio,
+            sound=self.sound,
         )
         cmd = [
             str(_resolve_pjsua(self.pjsua_path)),
@@ -529,7 +546,6 @@ class SipCallSession:
         if not pj.wait_log("active call", 5.0):
             if not pj.is_alive():
                 detail = pj.log_snippet()
-                self.hangup()
                 raise RuntimeError(
                     "pjsua exited at startup" + (f": {detail}" if detail else "")
                 )
@@ -539,6 +555,8 @@ class SipCallSession:
         if self.dtmf_after_confirm:
             # Meet answers quickly, then plays "enter PIN" — digits sent too
             # early are discarded. Wait for CONFIRMED, then for the IVR.
+            # TX echo from ATR2x is handled by plant hygiene+AEC (both legs),
+            # not Meet-specific mute timers.
             deadline = time.monotonic() + 20.0
             confirmed = False
             while time.monotonic() < deadline:
@@ -550,7 +568,8 @@ class SipCallSession:
                     break
                 time.sleep(0.1)
             if confirmed and pj.is_alive():
-                time.sleep(5.5)
+                print("sip: Meet answered — sending PIN", flush=True)
+                time.sleep(4.5)
                 self.send_dtmf(self.dtmf_after_confirm)
         # Ignore dial/setup log; only new DISCONNECTED means remote hangup.
         self._log_mark = len(pj.read_log())
@@ -575,7 +594,6 @@ class SipCallSession:
         self._pj = None
         if pj is not None:
             pj.hangup()
-
     def send_dtmf(self, digits: str) -> None:
         """Send RFC 2833 DTMF (Meet PIN, etc.) once the call is up."""
         pj = self._pj

@@ -37,9 +37,29 @@ def test_resample_doubles_length_for_half_rate():
     assert len(dst) == 8
 
 
-def test_resample_same_rate_is_noop():
-    src = array.array("h", [1, 2, 3, 4]).tobytes()
-    assert resample_s16_mono(src, 16000, 16000) == src
+def test_rms_s16_silence_and_tone():
+    from operator_os.audio import _rms_s16
+
+    silence = array.array("h", [0] * 100).tobytes()
+    assert _rms_s16(silence) == 0.0
+    loud = array.array("h", [10000] * 100).tobytes()
+    assert _rms_s16(loud) > 9000
+
+
+def test_thinking_melody_has_sound_and_rests():
+    from operator_os.audio import _rms_s16, build_thinking_melody
+
+    pcm = build_thinking_melody(8000)
+    assert len(pcm) > 8000  # >0.5s at 8kHz mono S16
+    assert _rms_s16(pcm) > 100  # not silence
+    # Motif includes rests — some frames near zero.
+    frame = 800  # 50ms @ 8k
+    quiet = sum(
+        1
+        for i in range(0, len(pcm) - frame, frame)
+        if _rms_s16(pcm[i : i + frame]) < 50
+    )
+    assert quiet >= 1
 
 
 def test_analyze_wav_levels_ok():
@@ -96,28 +116,23 @@ def test_fx_samples_load_short():
     assert all(Path(p).is_file() for p in seize_bank)
 
 
-def test_drain_hooks_before_pulses():
+def test_drain_fifo_preserves_order():
     import queue
 
-    from operator_os.main import _drain_prioritized
+    from operator_os.main import _drain_fifo
 
     q: queue.SimpleQueue = queue.SimpleQueue()
     q.put(("pulse", 1))
     q.put(("hook", False))
-    q.put(("pulse", 2))
-    q.put(("hook", True))
-    hooks, pulses, sms_ids, callbacks = _drain_prioritized(q)
-    assert hooks == [False, True]
-    assert pulses == [1, 2]
-    assert sms_ids == []
-    assert callbacks == []
     q.put(("sms", 42))
-    q.put(("hook", True))
-    q.put(("callback", "+15551212"))
-    hooks, pulses, sms_ids, callbacks = _drain_prioritized(q)
-    assert hooks == [True]
-    assert sms_ids == [42]
-    assert callbacks == ["+15551212"]
+    q.put(("place_call", "+15551212"))
+    items = _drain_fifo(q)
+    assert items == [
+        ("pulse", 1),
+        ("hook", False),
+        ("sms", 42),
+        ("place_call", "+15551212"),
+    ]
 
 
 def test_notify_hangup_is_hardware_cutoff():

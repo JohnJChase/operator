@@ -72,6 +72,9 @@ selftest:
 status:
     uv run operator-os status
 
+chart:
+    uv run operator-os chart
+
 test:
     uv run pytest
 

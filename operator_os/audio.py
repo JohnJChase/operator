@@ -8,6 +8,7 @@ import math
 import os
 import random
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -196,6 +197,46 @@ class AudioRouter:
         """Audible MWI: interrupted dial tone, then continuous dial until stop()."""
         self.play_tone("stutter_dial", seconds=stutter_s, wait=wait)
 
+    def play_thinking(self) -> None:
+        """Soft hold chime while the info desk waits on STT/LLM. Stops via stop()."""
+        if self._on_hook:
+            return
+        rate = self.cfg.sample_rate_hz
+        motif = build_thinking_melody(rate)
+        with self._lock:
+            if self._on_hook:
+                return
+            self._stop_locked()
+            self._stream_stop.clear()
+            gen = self._stop_gen
+            self._proc = subprocess.Popen(
+                [
+                    "aplay",
+                    "-q",
+                    "-D",
+                    self.cfg.alsa_device,
+                    "-f",
+                    "S16_LE",
+                    "-c",
+                    "1",
+                    "-r",
+                    str(rate),
+                    "-t",
+                    "raw",
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            thread = threading.Thread(
+                target=self._pcm_loop_writer,
+                args=(motif, self._proc, gen),
+                daemon=True,
+                name="thinking-melody",
+            )
+            self._stream_thread = thread
+            thread.start()
+
     def play_plant(self, name: str, *, wait: bool = True) -> None:
         """Play a named line-plant signature from a transition action.
 
@@ -357,6 +398,38 @@ class AudioRouter:
             except Exception:
                 pass
 
+    def _pcm_loop_writer(
+        self,
+        motif: bytes,
+        proc: subprocess.Popen[bytes],
+        gen: int,
+    ) -> None:
+        """Repeat a short PCM motif until stop()/hangup."""
+        stdin = proc.stdin
+        if stdin is None or not motif:
+            return
+        try:
+            while (
+                not self._stream_stop.is_set()
+                and not self._on_hook
+                and not self._stopped_since(gen)
+            ):
+                try:
+                    stdin.write(motif)
+                    stdin.flush()
+                except BrokenPipeError:
+                    break
+            try:
+                stdin.close()
+            except Exception:
+                pass
+            proc.wait(timeout=1.0)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
     def _play_pcm_raw(self, pcm: bytes, rate: int, wait: bool = True) -> None:
         """Play mono S16_LE raw PCM once through aplay."""
         if self._on_hook:
@@ -453,6 +526,7 @@ class AudioRouter:
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
             assert ff.stdout is not None
             ap = subprocess.Popen(
@@ -473,6 +547,7 @@ class AudioRouter:
                 stdin=ff.stdout,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
             ff.stdout.close()
             self._helper_proc = ff
@@ -723,6 +798,101 @@ class AudioRouter:
                     self._proc = None
         return out
 
+    def record_utterance(
+        self,
+        output_path: Path | str,
+        *,
+        max_s: float = 6.0,
+        silence_end_ms: int = 700,
+        speech_rms: int = 500,
+        min_speech_ms: int = 250,
+    ) -> Path:
+        """Record until post-speech silence, hangup, or max_s.
+
+        Fixed-duration ``record`` leaves long dead air after a short question;
+        the info desk uses this so STT/LLM start as soon as the caller stops.
+        """
+        if not self._physical_off_hook:
+            raise RuntimeError("mic capture is disabled while on-hook")
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        rate = self.cfg.sample_rate_hz
+        # ~50ms frames
+        frame_bytes = max(2, int(rate * 0.05) * 2)
+        silence_need = max(1, int(silence_end_ms / 50))
+        speech_need = max(1, int(min_speech_ms / 50))
+        max_frames = max(1, int(max_s / 0.05))
+
+        with self._lock:
+            self._stop_locked()
+            gen = self._stop_gen
+            self._proc = subprocess.Popen(
+                [
+                    "arecord",
+                    "-q",
+                    "-D",
+                    self.cfg.alsa_device,
+                    "-f",
+                    "S16_LE",
+                    "-c",
+                    "1",
+                    "-r",
+                    str(rate),
+                    "-t",
+                    "raw",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            proc = self._proc
+
+        assert proc.stdout is not None
+        pcm = bytearray()
+        silent_run = 0
+        speech_frames = 0
+        heard = False
+        try:
+            for _ in range(max_frames):
+                if self._stopped_since(gen) or not self._physical_off_hook:
+                    raise RuntimeError("recording interrupted")
+                chunk = proc.stdout.read(frame_bytes)
+                if not chunk:
+                    break
+                pcm.extend(chunk)
+                rms = _rms_s16(chunk)
+                if rms >= speech_rms:
+                    speech_frames += 1
+                    silent_run = 0
+                    if speech_frames >= speech_need:
+                        heard = True
+                else:
+                    silent_run += 1
+                    if heard and silent_run >= silence_need:
+                        break
+        finally:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=1.0)
+            except Exception:
+                pass
+            with self._lock:
+                if self._proc is proc:
+                    self._proc = None
+
+        if self._stopped_since(gen) or not self._physical_off_hook:
+            raise RuntimeError("recording interrupted")
+        if len(pcm) < 1000:
+            raise RuntimeError("recording too short")
+        with wave.open(str(out), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(rate)
+            wf.writeframes(bytes(pcm))
+        return out
+
     def _stop_locked(self) -> None:
         self._stream_stop.set()
         self._duplex = False
@@ -730,7 +900,18 @@ class AudioRouter:
             if proc is None:
                 continue
             if proc.poll() is None:
-                proc.kill()
+                try:
+                    # start_new_session children are their own group leader — kill
+                    # the group. Otherwise killpg would hit our process group.
+                    if os.getpgid(proc.pid) == proc.pid:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except (ProcessLookupError, PermissionError, OSError):
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
             if proc.stdin is not None:
                 try:
                     proc.stdin.close()
@@ -775,6 +956,53 @@ def ensure_wav_rate(src: Path, dest: Path, target_hz: int) -> None:
         out.setsampwidth(2)
         out.setframerate(target_hz)
         out.writeframes(pcm)
+
+
+def _rms_s16(pcm: bytes) -> float:
+    """RMS of mono S16LE PCM (empty → 0)."""
+    if len(pcm) < 2:
+        return 0.0
+    samples = array.array("h")
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    if not samples:
+        return 0.0
+    return math.sqrt(sum(int(s) * int(s) for s in samples) / len(samples))
+
+
+def build_thinking_melody(rate: int, *, amp: float = 0.07) -> bytes:
+    """Quiet repeating chime (period hold music) for desk think-time.
+
+    Soft ascending fourths with rests — audible presence without shouting
+    over the eventual spoken answer.
+    """
+    # (hz, duration_s); hz 0 = rest
+    motif: list[tuple[float, float]] = [
+        (392.0, 0.16),  # G4
+        (0.0, 0.06),
+        (523.25, 0.16),  # C5
+        (0.0, 0.06),
+        (659.25, 0.22),  # E5
+        (0.0, 0.10),
+        (523.25, 0.16),
+        (0.0, 0.55),
+    ]
+    out = array.array("h")
+    for hz, dur in motif:
+        n = max(1, int(rate * dur))
+        if hz <= 0:
+            out.extend([0] * n)
+            continue
+        fade = min(n // 4, int(rate * 0.02))
+        for i in range(n):
+            env = 1.0
+            if fade > 0:
+                if i < fade:
+                    env = i / fade
+                elif i > n - fade:
+                    env = (n - i) / fade
+            val = math.sin(2 * math.pi * hz * (i / rate)) * amp * env
+            out.append(int(max(-1.0, min(1.0, val)) * 32767))
+    return out.tobytes()
 
 
 def resample_s16_mono(pcm: bytes, src_rate: int, dst_rate: int) -> bytes:

@@ -95,3 +95,28 @@ Above all:
   - Interface Segregation Principle
   - Dependency Inversion Principle
 
+## Telephone chart
+
+Plant control is a named state chart in `operator_os/state.py` (see
+`docs/state-chart.md`, regenerate with `just chart`). Each state owns a
+**cordboard patch** (`operator_os.plant.STATE_PATCH`); entering a state applies
+that patch via `Plant.apply`. Cradle down enters `HOOK_PENDING` and cuts audio
+first; flash vs hangup is decided after silence.
+
+Audio topology: `docs/audio-line.md`.
+
+### Adding a telephone capability (mandatory)
+
+1. **Chart first** — new `State` / `Event` / edges in `state.py` (and `CHART_EDGES`).
+2. **Patch** — add or extend `STATE_PATCH` for that state (Receiver / Mic jumpers).
+3. **Context only in main/services** — URLs, Meet lists, SIP dest; emit events.
+4. **Never** from feature code: `aplay` / `arecord` / `alsaloop` / `amixer`,
+   direct `HandsetBridge.start`, Meet mute timers, soft “mode” flags, or
+   “race/queue order” fixes for plant behavior.
+
+If the bug is “forgot to stop audio,” “bridge still up,” or “echo on Meet,”
+fix the **patch table** or **plant** — not a one-off in the feature module.
+
+Do not invent out-of-chart telephone modes. If the bug story is queue order,
+the chart is wrong.
+

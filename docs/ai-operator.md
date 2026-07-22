@@ -19,9 +19,16 @@ Requires Google OAuth in `.env` (`GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` / `_REFRES
 
 1. One-time on the Pi: `just calendar-auth` (browser consent → refresh token written)
 2. Dial **7** off-hook → plant seize → looks up events around now with a phone entry point
-3. Speaks “Connecting to \<title\>.” then SIP dials the Meet number; after CONFIRMED, sends PIN#
-
-Ambiguous (multiple dial-ins) or none → spoken refusal; hangup cancels a live call.
+   (your **primary** calendar plus other calendars you **own** and have selected in Google UI;
+   not every shared coworker calendar. Override with `GOOGLE_CALENDAR_IDS` / `GOOGLE_CALENDAR_ID`)
+3. Resolution:
+   - One unique Meet (same conference on multiple calendars counts once) →
+     “Connecting to \<title\>.” then SIP + PIN#
+   - Several unique Meets but you RSVP’d **Yes** to exactly one → join that one
+   - Still ambiguous → chart state `MEET_CHOOSING`: spoken list
+     (“Number one, … Dial to choose.”); dial **1–N** to join (pulses collected
+     in that state — not under a soft session)
+4. None found → spoken refusal; hangup cancels a live call
 
 ## Local menu (digit 0)
 

@@ -144,3 +144,54 @@ def test_voicemail_intercept_to_sip_call():
     tr = ctl.handle(Event("off_hook"))
     assert ctl.state == State.SIP_CALL
     assert tr.reason == "vm_intercept"
+
+
+def test_meet_choosing_digit_places_call():
+    ctl = PhoneController()
+    ctl.handle(Event("off_hook"))
+    ctl.handle(Event("digit", value=7))
+    assert ctl.state == State.PLAYING_SERVICE
+    tr = ctl.handle(Event("meet_choose"))
+    assert ctl.state == State.MEET_CHOOSING
+    assert "announce_meet_choices" in tr.actions
+    tr = ctl.handle(Event("pulse"))
+    assert ctl.state == State.MEET_CHOOSING
+    tr = ctl.handle(Event("digit", value=1))
+    assert ctl.state == State.SIP_CALL
+    assert "sip_dial" in tr.actions
+    assert tr.reason == "meet_digit_1"
+
+
+def test_meet_choosing_timeout_to_dial_tone():
+    ctl = PhoneController()
+    ctl.handle(Event("off_hook"))
+    ctl.handle(Event("digit", value=7))
+    ctl.handle(Event("meet_choose"))
+    tr = ctl.handle(Event("meet_timeout"))
+    assert ctl.state == State.DIAL_TONE
+    assert "dial_tone" in tr.actions
+
+
+def test_sms_alerting_pickup_and_miss():
+    ctl = PhoneController()
+    tr = ctl.handle(Event("sms_alert", value=1))
+    assert ctl.state == State.SMS_ALERTING
+    assert "ring_sms" in tr.actions
+    tr = ctl.handle(Event("off_hook"))
+    assert ctl.state == State.PLAYING_SERVICE
+    assert "announce_sms" in tr.actions
+
+    ctl = PhoneController()
+    ctl.handle(Event("sms_alert", value=2))
+    tr = ctl.handle(Event("pickup_timeout"))
+    assert ctl.state == State.ON_HOOK_IDLE
+    assert tr.reason == "sms_missed"
+
+
+def test_chart_edges_cover_hook_pending_and_sms():
+    from operator_os.state import CHART_EDGES, State
+
+    labels = {(e.source, e.event, e.dest) for e in CHART_EDGES}
+    assert (State.DIAL_TONE, "cradle_down", State.HOOK_PENDING) in labels
+    assert (State.ON_HOOK_IDLE, "sms_alert", State.SMS_ALERTING) in labels
+    assert (State.HOOK_PENDING, "hangup", State.ON_HOOK_IDLE) in labels

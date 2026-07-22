@@ -73,6 +73,8 @@ audio:
   sample_rate_hz: 16000
   channels: 1
   format: S16_LE
+  # ATR2x electrically mixes speaker→mic at capture=30; dial back when both legs live.
+  sip_mic_capture: 12
   tts:
     engine: piper
     fallback: espeak
@@ -146,7 +148,9 @@ timing:
   voicemail_record_ms: 30000
   # Audible MWI: stutter dial tone length before continuous dial (SMS or VM waiting).
   mwi_stutter_ms: 2500
-  # After inbox item hint: wait this long for hook flash (reply / callback).
+  # After each inbox item: brief flash window, then next message (not a long stall).
+  inbox_hint_ms: 2500
+  # After user starts a reply: wait this long for flash-to-send (or live SMS hint).
   inbox_flash_wait_ms: 15000
   # SMS alert: one quick double-ring, then quiet pickup window (else queue for digit 5).
   sms_pickup_window_ms: 30000
