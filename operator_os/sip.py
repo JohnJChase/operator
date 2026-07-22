@@ -22,6 +22,10 @@ LOCAL_SIP_PORT = 5080
 LAST_LOG = Path(os.environ.get("OPERATOR_SIP_LAST_LOG", "/tmp/operator-last-pjsua.log"))
 VM_DIR = ROOT / "data" / "voicemail"
 ACTIVE_REC = VM_DIR / "_active.wav"
+VM_GREETING_WAV = VM_DIR / "greeting.wav"
+VM_GREETING_TEXT = (
+    "The party you called is not available. Please leave a message after the tone."
+)
 
 
 def normalize_nanp(raw: str, *, default_region: str = "1") -> str | None:
@@ -131,27 +135,12 @@ def _resolve_pjsua(pjsua_path: Path = DEFAULT_PJSUA) -> Path:
 
 
 def _write_asoundrc(home: Path, device: str) -> None:
-    """Force pjsua's default PCM to the handset ALSA device."""
-    card = "0"
-    m = re.match(r"(?:plug)?hw:(\d+)", device.replace(" ", ""))
-    if m:
-        card = m.group(1)
-    (home / ".asoundrc").write_text(
-        "\n".join(
-            [
-                "pcm.!default {",
-                "  type plug",
-                f'  slave.pcm "{device}"',
-                "}",
-                "ctl.!default {",
-                "  type hw",
-                f"  card {card}",
-                "}",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    """Deprecated handset default — SIP uses ``write_sip_line_asoundrc`` instead."""
+    from operator_os.handset_bridge import write_sip_line_asoundrc
+
+    # Ignore handset device string; softphone always sits on snd-aloop.
+    del device
+    write_sip_line_asoundrc(home)
 
 
 def _telnyx_reject_message(log_text: str) -> str | None:
@@ -172,13 +161,11 @@ def _telnyx_reject_message(log_text: str) -> str | None:
 
 
 def _pjsua_media_args(*, null_audio: bool) -> list[str]:
-    """Shared media flags for handset acoustics (carbon mic + receiver).
+    """Shared media flags for the virtual SIP line (snd-aloop via asoundrc).
 
-    Do not pass ``--capture-dev`` / ``--playback-dev``: PortAudio index 0 is
-    often HDMI (no capture) on the Pi, and pjsua then exits a few seconds after
-    REGISTER. Default devices (-1) honor the per-process ``~/.asoundrc`` that
-    points at the handset USB card. ``--snd-auto-close=0`` keeps the device open
-    while idle so inbound stays registered without a respawn loop.
+    Softphone never opens the USB handset. Default devices (-1) use the
+    per-process ``~/.asoundrc`` from ``write_sip_line_asoundrc``. Handset joins
+    only via ``HandsetBridge`` (alsaloop) while a live call is up.
     """
     if null_audio:
         return [
@@ -212,6 +199,62 @@ def sip_configured() -> bool:
     return creds is not None and bool(creds.caller_id.strip())
 
 
+def ensure_voicemail_greeting(audio: object) -> Path:
+    """Render greeting WAV at 8 kHz for pjsua conference play-file (no handset I/O)."""
+    from operator_os.audio import ensure_wav_rate
+
+    VM_DIR.mkdir(parents=True, exist_ok=True)
+    if VM_GREETING_WAV.is_file() and VM_GREETING_WAV.stat().st_size > 500:
+        return VM_GREETING_WAV
+    synthesize = getattr(audio, "synthesize", None)
+    if synthesize is None:
+        raise RuntimeError("audio router cannot synthesize greeting")
+    raw = synthesize(VM_GREETING_TEXT)
+    if raw is None:
+        raise RuntimeError("voicemail greeting synthesize failed")
+    try:
+        ensure_wav_rate(Path(raw), VM_GREETING_WAV, 8000)
+        _append_beep_wav(VM_GREETING_WAV, hz=880.0, ms=350)
+    finally:
+        try:
+            Path(raw).unlink(missing_ok=True)
+        except OSError:
+            pass
+    return VM_GREETING_WAV
+
+
+def _append_beep_wav(path: Path, *, hz: float, ms: int) -> None:
+    import array
+    import math
+    import wave
+
+    with wave.open(str(path), "rb") as w:
+        rate = w.getframerate()
+        channels = w.getnchannels()
+        width = w.getsampwidth()
+        frames = w.readframes(w.getnframes())
+    if channels != 1 or width != 2:
+        return
+    n = max(1, int(rate * (ms / 1000.0)))
+    amp = 0.25
+    beep = array.array("h")
+    for i in range(n):
+        # Short fade to avoid a click.
+        env = 1.0
+        if i < 40:
+            env = i / 40.0
+        elif i > n - 40:
+            env = max(0.0, (n - i) / 40.0)
+        sample = int(amp * env * 32767.0 * math.sin(2.0 * math.pi * hz * (i / rate)))
+        beep.append(max(-32767, min(32767, sample)))
+    silence = array.array("h", [0] * int(rate * 0.15))
+    with wave.open(str(path), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        out.writeframes(frames + silence.tobytes() + beep.tobytes())
+
+
 def _cli_from_sip_log(text: str) -> str:
     """Best-effort E.164 from pjsua log (From / Contact)."""
     for pat in (
@@ -227,6 +270,32 @@ def _cli_from_sip_log(text: str) -> str:
         if got:
             return got
     return ""
+
+
+def _parse_conf_ports(log_text: str) -> dict[str, int]:
+    """Map rough roles → conference port ids from ``cl`` output."""
+    ports: dict[str, int] = {}
+    for m in re.finditer(r"Port\s+#?\s*(\d+)\s*([^\n]*)", log_text, re.I):
+        idx = int(m.group(1))
+        line = m.group(2).lower()
+        if "master" in line or "sound" in line:
+            ports["sound"] = idx
+        elif "_active" in line:
+            ports["recorder"] = idx
+        elif "greeting" in line:
+            ports["file"] = idx
+        elif ".wav" in line or "file" in line:
+            ports.setdefault("file", idx)
+        elif "sip:" in line or "call" in line:
+            ports["call"] = idx
+    if "call" not in ports:
+        nums = [int(x) for x in re.findall(r"Port\s+#?\s*(\d+)", log_text)]
+        skip = {ports.get("sound"), ports.get("file"), ports.get("recorder")}
+        for n in nums:
+            if n not in skip:
+                ports["call"] = n
+                break
+    return ports
 
 
 @dataclass
@@ -577,6 +646,10 @@ class SipInboundListener:
 
     Uses SIP username as ``--id`` (required for Telnyx REGISTER). Stop before
     outbound dial — both bind ``LOCAL_SIP_PORT``.
+
+    Audio is always the virtual SIP line (snd-aloop). The USB handset is joined
+    only by ``HandsetBridge`` when main starts a live (off-hook) call — never
+    from voicemail / other on-hook features.
     """
 
     credentials: SipCredentials
@@ -584,6 +657,7 @@ class SipInboundListener:
     pjsua_path: Path = field(default_factory=lambda: DEFAULT_PJSUA)
     register_timeout_s: float = 12.0
     null_audio: bool = False
+    greeting_wav: Path | None = None
     _pj: _PjsuaProc | None = field(default=None, init=False, repr=False)
     _phase: str = field(default="down", init=False, repr=False)  # down|listen|ringing|up
     _mark: int = field(default=0, init=False, repr=False)
@@ -592,6 +666,9 @@ class SipInboundListener:
     def start(self) -> None:
         if self._pj is not None:
             return
+        from operator_os.handset_bridge import ensure_loopback_card
+
+        ensure_loopback_card()
         VM_DIR.mkdir(parents=True, exist_ok=True)
         try:
             ACTIVE_REC.unlink(missing_ok=True)
@@ -621,11 +698,14 @@ class SipInboundListener:
             f"--local-port={LOCAL_SIP_PORT}",
             "--use-srtp=0",
             "--srtp-secure=0",
-            # Conference-bridge recording for voicemail (kept only on miss).
+            # Recorder port exists but is NOT auto-connected — we arm it only
+            # after the OGM so the mailbox WAV has no leading silence.
             f"--rec-file={ACTIVE_REC}",
-            "--auto-rec",
-            *_pjsua_media_args(null_audio=self.null_audio),
         ]
+        greet = self.greeting_wav
+        if greet is not None and greet.is_file():
+            cmd.append(f"--play-file={greet}")
+        cmd.extend(_pjsua_media_args(null_audio=self.null_audio))
         pj.spawn(cmd)
         self._pj = pj
         if not pj.wait_log("registration success", self.register_timeout_s):
@@ -678,32 +758,117 @@ class SipInboundListener:
             self._remote_e164 = _cli_from_sip_log(pj.read_log())
         return self._remote_e164
 
+    def _conf_ports(self) -> dict[str, int]:
+        pj = self._pj
+        if pj is None:
+            return {}
+        pj.write(b"cl\r")
+        time.sleep(0.2)
+        return _parse_conf_ports(pj.read_log())
+
+    def _pause_recorder(self) -> None:
+        """Disconnect call → recorder if connected."""
+        pj = self._pj
+        if pj is None or not pj.is_alive():
+            return
+        ports = self._conf_ports()
+        call = ports.get("call")
+        rec = ports.get("recorder")
+        if call is None or rec is None:
+            return
+        pj.write(f"cd\r{call}\r{rec}\r".encode())
+        time.sleep(0.05)
+
+    def _greeting_duration_s(self) -> float:
+        """Actual play-through length of the on-disk OGM (includes trailing beep)."""
+        path = self.greeting_wav if self.greeting_wav is not None else VM_GREETING_WAV
+        if not path.is_file():
+            raise RuntimeError(f"voicemail greeting missing: {path}")
+        dur = wav_duration_s(path)
+        if dur <= 0:
+            raise RuntimeError(f"voicemail greeting has no duration: {path}")
+        return dur
+
+    def _arm_recorder(self) -> None:
+        """Connect call → recorder (message window only — after the beep)."""
+        pj = self._pj
+        if pj is None or not pj.is_alive():
+            return
+        ports = self._conf_ports()
+        call = ports.get("call")
+        rec = ports.get("recorder")
+        if call is None or rec is None:
+            return
+        pj.write(f"cc\r{call}\r{rec}\r".encode())
+        time.sleep(0.05)
+
+    def _play_conference_greeting_once(self) -> None:
+        """Play OGM on the SIP leg, then arm the recorder for the caller.
+
+        Wait time is the measured WAV duration (re-read from disk), not a
+        hardcoded constant — so a longer/shorter greeting stays in sync.
+        ``--rec-file`` is registered without ``--auto-rec``, so nothing is
+        written until ``_arm_recorder`` after the beep.
+        """
+        pj = self._pj
+        if pj is None or not pj.is_alive():
+            return
+        try:
+            dur = self._greeting_duration_s()
+        except RuntimeError as e:
+            # Fail soft: skip OGM rather than invent a sleep length.
+            print(f"vm: {e}", flush=True)
+            self._arm_recorder()
+            return
+        ports = self._conf_ports()
+        call = ports.get("call")
+        wav = ports.get("file")
+        if call is None or wav is None:
+            self._arm_recorder()
+            return
+        pj.write(f"cc\r{wav}\r{call}\r".encode())
+        time.sleep(0.05)
+        # Full file length; brief settle for the last samples to leave the bridge.
+        time.sleep(dur + 0.05)
+        pj.write(f"cd\r{wav}\r{call}\r".encode())
+        time.sleep(0.05)
+        self._arm_recorder()
+
     def take_recording(self, dest: Path) -> Path | None:
         return take_active_recording(dest)
 
     def discard_recording(self) -> None:
         discard_active_recording()
 
-    def answer(self) -> None:
+    def answer(self, *, handset: bool = True) -> None:
+        """Answer the inbound INVITE on the virtual SIP line.
+
+        Softphone audio is always snd-aloop — never the USB handset.
+        ``handset=True`` means the caller already lifted; main must start
+        ``HandsetBridge`` so alsaloop joins line ↔ cradle. Voicemail uses
+        ``handset=False``: conference greeting/record only; bridge stays down.
+        """
         pj = self._pj
         if pj is None or not pj.is_alive():
             raise RuntimeError("inbound pjsua not running")
-        # CLI prompts: "Answer with code (100-699)" — bare `a` is not enough.
         pj.write(b"a\r200\r")
         self._phase = "up"
         self._mark = len(pj.read_log())
-        # Wait briefly for 200/CONFIRMED so we fail loud if answer didn't take.
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
             text = pj.read_log()
             if "CONFIRMED" in text or "state changed to CONFIRMED" in text:
-                return
+                break
             if "DISCONNECTED" in text:
                 raise RuntimeError("SIP answer failed (call dropped)")
             time.sleep(0.05)
-        # Soft warning only — some builds log differently.
-        if "CONFIRMED" not in pj.read_log():
-            raise RuntimeError("SIP answer sent but call not confirmed")
+        else:
+            if "CONFIRMED" not in pj.read_log():
+                raise RuntimeError("SIP answer sent but call not confirmed")
+
+        if not handset:
+            # On-hook miss: OGM + record on the virtual line only.
+            self._play_conference_greeting_once()
 
     def hangup(self) -> None:
         pj = self._pj

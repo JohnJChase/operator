@@ -2,21 +2,23 @@
 
 Missed inbound SIP calls leave a message on the Pi.
 
+## Architecture
+
+See [audio-line.md](audio-line.md). Short version:
+
+- Softphone = **snd-aloop** virtual line (never the USB handset).
+- Voicemail answers on that line only — no `detach_handset`, no faking hook.
+- Live talk starts `HandsetBridge` (alsaloop) so cradle ↔ line join.
+
 ## Behavior
 
-1. Inbound INVITE rings the WE302 (`inbound_ring_timeout_ms`, default 45s).
-2. No answer → answer the SIP leg on-hook → spoken greeting + tone → record
-   (`voicemail_record_ms`, default 30s) via pjsua conference `--auto-rec`.
-3. Caller hangup or record timeout → WAV under `data/voicemail/` + row in
-   `operator.sqlite3` (`voicemails` table).
-4. Lift during greeting/record **intercepts** into a live call (recording discarded).
-
-**Ceiling:** greeting uses Piper on the shared ALSA device while pjsua holds the
-call. If they fight, the caller may hear silence before the record window; the
-WAV path still works.
-
-Answered human calls also get a temporary `_active.wav`; it is discarded on
-hangup (not saved as voicemail).
+1. Inbound INVITE rings the WE302 (`inbound_ring_timeout_ms`, default **25s** ≈ 5 rings).
+2. No answer → `answer(handset=False)` on the virtual line → conference greeting
+   once → record caller after the beep (`voicemail_record_ms`, default 30s).
+3. Caller hangup or record timeout → WAV under `data/voicemail/` + SQLite row
+   (archive **before** inbound re-register).
+4. Lift during greeting/record **intercepts**: discard recording, start handset
+   bridge for a live call.
 
 ## Listen
 

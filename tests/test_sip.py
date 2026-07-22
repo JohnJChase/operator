@@ -93,6 +93,47 @@ def test_cli_from_sip_log_finds_e164():
     assert _cli_from_sip_log(text) == "+12025551212"
 
 
+def test_greeting_duration_reads_wav(tmp_path):
+    """OGM wait must track the file on disk, not a hardcoded sleep."""
+    import array
+    import wave
+
+    from operator_os.sip import SipCredentials, SipInboundListener, wav_duration_s
+
+    rate = 8000
+    n = rate * 2  # 2.0 seconds
+    pcm = array.array("h", [0] * n)
+    path = tmp_path / "greeting.wav"
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm.tobytes())
+    assert abs(wav_duration_s(path) - 2.0) < 0.01
+    lis = SipInboundListener(
+        credentials=SipCredentials(username="u", password="p", caller_id="+12025550100"),
+        greeting_wav=path,
+    )
+    assert abs(lis._greeting_duration_s() - 2.0) < 0.01
+
+
+def test_parse_conf_ports_roles():
+    from operator_os.sip import _parse_conf_ports
+
+    text = """
+Conference ports:
+Port #0[8KHz/1] Master/sound
+Port #1[8KHz/1] greeting.wav
+Port #2[8KHz/1] _active.wav
+Port #3[8KHz/1] sip:+15551212@sip.telnyx.com
+"""
+    ports = _parse_conf_ports(text)
+    assert ports["sound"] == 0
+    assert ports["file"] == 1
+    assert ports["recorder"] == 2
+    assert ports["call"] == 3
+
+
 def test_outbound_remote_ended_on_disconnected():
     from operator_os.sip import SipCallSession
 

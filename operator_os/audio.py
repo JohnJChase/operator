@@ -86,7 +86,9 @@ class AudioRouter:
         self._capture_thread: threading.Thread | None = None
         self._duplex = False
         self._stop_gen = 0  # bumped on every stop(); long ops abort if gen changes
-        self._on_hook = True
+        # Physical cradle only. Mic capture is impossible unless this is True.
+        # Application code must not fake off-hook to "enable" audio while on-hook.
+        self._physical_off_hook = False
         self.engine = "unloaded"
         self.model_path: Path | None = None
         self._piper = None
@@ -106,22 +108,32 @@ class AudioRouter:
             self.engine = "espeak"
             self.model_path = None
 
-    def set_hook(self, off_hook: bool) -> None:
-        self._on_hook = not off_hook
-        if self._on_hook:
+    def bind_physical_hook(self, off_hook: bool) -> None:
+        """Cradle switch binding. The only way to enable handset mic/capture."""
+        self._physical_off_hook = bool(off_hook)
+        if not self._physical_off_hook:
             self.stop()
+
+    def set_hook(self, off_hook: bool) -> None:
+        """Alias for bind_physical_hook (GPIO / simulator cradle)."""
+        self.bind_physical_hook(off_hook)
 
     @property
     def is_on_hook(self) -> bool:
-        return self._on_hook
+        return not self._physical_off_hook
+
+    @property
+    def _on_hook(self) -> bool:
+        """Playback/mic gate derived from the physical cradle."""
+        return not self._physical_off_hook
 
     def notify_hangup(self) -> None:
         """Physical hangup = hardware cutoff. Mark on-hook and kill audio NOW.
 
         Safe from the GPIO callback thread. State machines may still run later;
-        this alone must silence the receiver and block new playback.
+        this alone must silence the receiver and block new playback/mic.
         """
-        self._on_hook = True
+        self._physical_off_hook = False
         self.stop()
 
     def stop(self) -> None:
@@ -508,7 +520,7 @@ class AudioRouter:
 
     def start_duplex(self, on_capture: object) -> None:
         """Start handset capture + playback for Realtime. on_capture(pcm_s16_handset_rate)."""
-        if self._on_hook:
+        if not self._physical_off_hook:
             raise RuntimeError("duplex disabled while on-hook")
         rate = self.cfg.sample_rate_hz
         # ~100ms chunks at handset rate
@@ -517,7 +529,11 @@ class AudioRouter:
         def _reader(proc: subprocess.Popen[bytes], gen: int) -> None:
             assert proc.stdout is not None
             try:
-                while not self._stream_stop.is_set() and not self._stopped_since(gen) and not self._on_hook:
+                while (
+                    not self._stream_stop.is_set()
+                    and not self._stopped_since(gen)
+                    and self._physical_off_hook
+                ):
                     data = proc.stdout.read(chunk)
                     if not data:
                         break
@@ -636,8 +652,11 @@ class AudioRouter:
             )
 
     def record(self, seconds: float, output_path: Path | str) -> Path:
-        """Record from the handset mic. Interruptible via stop()/hangup."""
-        if self._on_hook:
+        """Record from the handset mic. Interruptible via stop()/hangup.
+
+        Hard rule: mic is a physical disconnect while on-hook — no app override.
+        """
+        if not self._physical_off_hook:
             raise RuntimeError("mic capture is disabled while on-hook")
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -667,12 +686,12 @@ class AudioRouter:
             proc = self._proc
         try:
             while proc.poll() is None:
-                if self._stopped_since(gen):
+                if self._stopped_since(gen) or not self._physical_off_hook:
                     proc.kill()
                     break
                 time.sleep(0.05)
             rc = proc.wait(timeout=1.0)
-            if self._stopped_since(gen):
+            if self._stopped_since(gen) or not self._physical_off_hook:
                 raise RuntimeError("recording interrupted")
             if rc != 0:
                 raise RuntimeError(f"arecord failed rc={rc}")

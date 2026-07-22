@@ -19,7 +19,7 @@ class State(str, Enum):
     PLAYING_SERVICE = "PLAYING_SERVICE"
     OUTSIDE_LINE = "OUTSIDE_LINE"  # seized trunk; collecting destination digits
     SIP_CALL = "SIP_CALL"  # live Telnyx call
-    VOICEMAIL = "VOICEMAIL"  # on-hook miss: answered + recording
+    VOICEMAIL = "VOICEMAIL"  # on-hook miss: SIP answered; handset mic must stay dead
     DIAGNOSTIC = "DIAGNOSTIC"
     ERROR = "ERROR"
 

@@ -140,8 +140,9 @@ timing:
   hook_flash_max_ms: 700
   definite_hangup_min_ms: 1000
   outside_number_interdigit_timeout_ms: 3500
-  inbound_ring_timeout_ms: 45000
-  # After miss: greet + record window (pjsua conference WAV).
+  # ~5 ring cycles (US cadence ~6s); was 45s / ~8 rings — too long.
+  inbound_ring_timeout_ms: 25000
+  # After miss: greet + record window (pjsua conference WAV; handset mic muted).
   voicemail_record_ms: 30000
 safety:
   ring_gpio_fails_off: true

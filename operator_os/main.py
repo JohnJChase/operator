@@ -254,6 +254,7 @@ def run_loop(
         SipInboundListener,
         VM_DIR,
         discard_active_recording,
+        ensure_voicemail_greeting,
         normalize_nanp,
         sip_configured,
         take_active_recording,
@@ -291,12 +292,28 @@ def run_loop(
     alsa_device = profile.audio.alsa_device
     hook_clf = HookFlashClassifier.from_profile(profile)
     sms_webhook: SmsWebhookServer | None = None
+    from operator_os.handset_bridge import HandsetBridge
+
+    handset_bridge = HandsetBridge(handset_alsa=alsa_device)
 
     def _status(msg: str) -> None:
         print(msg, flush=True)
 
+    def _bridge_start() -> None:
+        try:
+            handset_bridge.start()
+            _status("sip: handset bridge up (line ↔ cradle)")
+        except Exception as e:
+            _status(f"sip: handset bridge failed {e}")
+
+    def _bridge_stop() -> None:
+        if handset_bridge.active:
+            handset_bridge.stop()
+            _status("sip: handset bridge down")
+
     def _hangup_sip(*, discard_rec: bool = True) -> None:
         nonlocal sip_session, sip_dest, sip_dtmf, inbound, ring_started_at, vm_until
+        _bridge_stop()
         if discard_rec:
             discard_active_recording()
         if sip_session is not None:
@@ -332,7 +349,12 @@ def run_loop(
         if creds is None:
             return
         try:
-            listener = SipInboundListener(credentials=creds, alsa_device=alsa_device)
+            greeting = ensure_voicemail_greeting(audio)
+            listener = SipInboundListener(
+                credentials=creds,
+                alsa_device=alsa_device,
+                greeting_wav=greeting,
+            )
             listener.start()
             inbound = listener
             # Only announce once (and again after a failed attempt).
@@ -356,11 +378,23 @@ def run_loop(
             if action == "sip_answer":
                 if inbound is not None:
                     try:
-                        inbound.answer()
+                        # Softphone is always on snd-aloop. Live answer joins the
+                        # cradle via HandsetBridge; voicemail leaves bridge down.
+                        use_handset = tr.reason != "voicemail"
+                        if use_handset:
+                            _bridge_start()
+                        inbound.answer(handset=use_handset)
                         sip_session = inbound
                         inbound = None
-                        events.emit("sip", value="answer")
-                        _status("sip: answered inbound")
+                        events.emit(
+                            "sip",
+                            value="answer",
+                            detail="handset" if use_handset else "line",
+                        )
+                        _status(
+                            "sip: answered inbound"
+                            + ("" if use_handset else " (virtual line / voicemail)")
+                        )
                     except Exception as e:
                         _status(f"sip: answer failed {e}")
                         _hangup_sip()
@@ -382,6 +416,7 @@ def run_loop(
                 op_session.cancel_now()
                 op_session = None
             # Drop any live call, then re-register for inbound.
+            _bridge_stop()
             if sip_session is not None:
                 sip_session.hangup()
                 sip_session = None
@@ -405,32 +440,25 @@ def run_loop(
         return digits or "unknown"
 
     def _begin_voicemail() -> None:
-        """Greet caller then open the record window. Ceiling: Piper may fight pjsua ALSA."""
+        """Arm the record window after conference-only answer + greeting.
+
+        Voicemail never touches AudioRouter / handset ALSA — that is owned by
+        physical hook + SipInboundListener.answer(handset=...).
+        """
         nonlocal vm_until
         if not live_audio or sip_session is None:
             return
-        # Allow speak while cradle is down so greeting can try the shared device.
-        audio.set_hook(True)
-        try:
-            audio.speak(
-                "The party you called is not available. "
-                "Please leave a message after the tone.",
-                wait=True,
-            )
-            try:
-                audio.play_tone(880.0, seconds=0.35, wait=True)
-            except Exception:
-                pass
-        except Exception as e:
-            _status(f"vm: greet failed {e}")
-        finally:
-            audio.set_hook(False)
         vm_until = time.monotonic() + vm_record_s
         events.emit("voicemail", value="recording")
-        _status(f"vm: recording up to {vm_record_s:.0f}s")
+        _status(f"vm: recording up to {vm_record_s:.0f}s (conference only)")
 
     def _complete_voicemail(*, save: bool) -> None:
-        """Hang up the miss leg; optionally keep the conference WAV + DB row."""
+        """Hang up the miss leg; optionally keep the conference WAV + DB row.
+
+        Critical order: archive ``_active.wav`` *before* re-registering inbound.
+        ``SipInboundListener.start`` unlinks/recreates that path — taking after
+        ``_ensure_inbound`` was why saves came back empty.
+        """
         nonlocal sip_session, vm_until
         from operator_os import db as store
 
@@ -438,26 +466,34 @@ def run_loop(
         if isinstance(sip_session, SipInboundListener):
             from_e164 = sip_session.remote_e164()
         vm_until = None
-        # Hangup first so pjsua flushes the recorder, then move the file.
-        apply(ctl.handle(Event("vm_done")))
-        if not save:
+
+        # Flush the recorder by stopping pjsua, then archive before idle restart.
+        if sip_session is not None:
+            sip_session.hangup()
+            sip_session = None
+        time.sleep(0.2)
+
+        if save:
+            dest = VM_DIR / f"vm_{int(time.time())}_{_vm_safe_name(from_e164)}.wav"
+            path = take_active_recording(dest)
+            if path is None:
+                _status("vm: no audio captured")
+                events.emit("voicemail", value="empty")
+            else:
+                dur = wav_duration_s(path)
+                row = store.insert_voicemail(
+                    from_e164=from_e164 or "",
+                    path=str(path),
+                    duration_s=dur,
+                )
+                events.emit("voicemail", value="saved", digit=row.id)
+                _status(f"vm: saved id={row.id} from={from_e164 or '?'} ({dur:.1f}s)")
+        else:
             discard_active_recording()
             events.emit("voicemail", value="discarded")
-            return
-        dest = VM_DIR / f"vm_{int(time.time())}_{_vm_safe_name(from_e164)}.wav"
-        path = take_active_recording(dest)
-        if path is None:
-            _status("vm: no audio captured")
-            events.emit("voicemail", value="empty")
-            return
-        dur = wav_duration_s(path)
-        row = store.insert_voicemail(
-            from_e164=from_e164 or "",
-            path=str(path),
-            duration_s=dur,
-        )
-        events.emit("voicemail", value="saved", digit=row.id)
-        _status(f"vm: saved id={row.id} from={from_e164 or '?'} ({dur:.1f}s)")
+
+        # Idle + re-register (new empty ``_active.wav`` is fine; archive is done).
+        apply(ctl.handle(Event("vm_done")))
 
     def _start_sip_call() -> None:
         nonlocal sip_session, sip_dest, sip_dtmf
@@ -472,6 +508,7 @@ def run_loop(
             return
         audio.stop()
         try:
+            _bridge_start()
             _status(f"sip: dialing {dest}")
             sess = SipCallSession(
                 e164=dest,
@@ -484,6 +521,7 @@ def run_loop(
             events.emit("sip", value="dial", detail=dest)
             _status(f"sip: call up {dest} (hang up to cancel)")
         except Exception as e:
+            _bridge_stop()
             _status(f"sip: dial failed {e}")
             events.emit("sip", value="error", detail=str(e)[:120])
             audio.speak("Unable to complete the call.", wait=False)
@@ -589,10 +627,12 @@ def run_loop(
             pending_sms = sms_announce_id
             if pending_sms is not None:
                 _stop_sms_ring()
-            # Intercept voicemail: keep the live SIP leg, drop the recording.
+            # Intercept voicemail: keep the live SIP leg, drop the recording,
+            # join cradle via bridge (softphone stays on the virtual line).
             if ctl.state == State.VOICEMAIL:
                 discard_active_recording()
                 vm_until = None
+                _bridge_start()
             apply(ctl.handle(Event("off_hook")))
             audio.set_hook(True)
             if pending_sms is not None and live_audio:
@@ -616,6 +656,7 @@ def run_loop(
             op_session.cancel_now()
         _stop_sms_ring()
         _hangup_sip()
+        _bridge_stop()
         audio.notify_hangup()
         events.emit("hook", value="on_hook")
         _status("hook=ON_HOOK")

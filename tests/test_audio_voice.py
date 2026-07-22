@@ -119,7 +119,7 @@ def test_drain_hooks_before_pulses():
 
 def test_notify_hangup_is_hardware_cutoff():
     """Hangup marks on-hook and blocks new playback (even after TTS synthesize)."""
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
 
     from operator_os.audio import AudioConfig, AudioRouter
 
@@ -140,6 +140,27 @@ def test_notify_hangup_is_hardware_cutoff():
         audio.play_tone(440, seconds=0.1, wait=False)
         audio.play_file("/tmp/does-not-matter.wav", wait=False)
         popen.assert_not_called()
+    audio.close()
+
+
+def test_mic_record_forbidden_while_on_hook(tmp_path: Path):
+    """Handset mic must be impossible on-hook — no app soft-override."""
+    from operator_os.audio import AudioConfig, AudioRouter
+
+    audio = AudioRouter(
+        AudioConfig(
+            alsa_device="null",
+            sample_rate_hz=16000,
+            channels=1,
+            format="S16_LE",
+            piper_voice="hfc_female",
+            piper_volume=0.6,
+        )
+    )
+    assert audio.is_on_hook is True
+    with pytest.raises(RuntimeError, match="on-hook"):
+        audio.record(1.0, tmp_path / "should-not-exist.wav")
+    assert not (tmp_path / "should-not-exist.wav").exists()
     audio.close()
 
 

@@ -43,8 +43,25 @@ setup-voices:
     echo "Missing $dest — place en_US-hfc_female-medium.onnx (+ .onnx.json) in voices/hfc_female/" >&2
     exit 1
 
+# Foreground loop — stop the unit first or GPIO will be busy:
+#   just stop && just run
 run:
     uv run operator-os run
+
+# Appliance unit (deploy/operator-os.service). Needs sudo for start/stop/restart.
+restart:
+    sudo systemctl restart operator-os.service
+    systemctl --no-pager --lines=12 status operator-os.service
+
+stop:
+    sudo systemctl stop operator-os.service
+
+start:
+    sudo systemctl start operator-os.service
+    systemctl --no-pager --lines=12 status operator-os.service
+
+logs:
+    journalctl -u operator-os.service -f
 
 simulate *args:
     uv run operator-os simulate {{args}}

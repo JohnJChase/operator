@@ -24,6 +24,17 @@ Funnel is **not** a separate systemd unit. After Funnel is configured once, rebo
 
 `https://operator.tail2276c3.ts.net/` → `http://127.0.0.1:8787`
 
+Also install the loopback module so the virtual SIP line exists after reboot:
+
+```bash
+sudo cp deploy/modules-load.d/operator-aloop.conf /etc/modules-load.d/
+sudo cp deploy/modprobe.d/operator-aloop.conf /etc/modprobe.d/
+sudo modprobe snd-aloop
+aplay -l | grep -i loop
+```
+
+See [audio-line.md](audio-line.md).
+
 Telnyx webhook path: `https://operator.tail2276c3.ts.net/webhooks/telnyx/sms`
 
 Verify after reboot:
