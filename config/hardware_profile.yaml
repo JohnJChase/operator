@@ -141,6 +141,8 @@ timing:
   definite_hangup_min_ms: 1000
   outside_number_interdigit_timeout_ms: 3500
   inbound_ring_timeout_ms: 45000
+  # After miss: greet + record window (pjsua conference WAV).
+  voicemail_record_ms: 30000
 safety:
   ring_gpio_fails_off: true
   ring_while_off_hook_allowed: false

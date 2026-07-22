@@ -5,6 +5,7 @@ from operator_os.sip import (
     _pjsua_media_args,
     _telnyx_reject_message,
     normalize_nanp,
+    speak_phone_number,
 )
 
 
@@ -35,6 +36,14 @@ def test_normalize_rejects_short():
     assert normalize_nanp("911") is None
     assert normalize_nanp("5551212") is None
     assert normalize_nanp("") is None
+
+
+def test_speak_phone_number_nanp_digit_words():
+    # +1 202-306-1203
+    assert speak_phone_number("+12023061203") == (
+        "two zero two, three zero six, one two zero three"
+    )
+    assert "billion" not in speak_phone_number("+15551234567").lower()
 
 
 def test_local_id_prefers_caller_id():
@@ -75,3 +84,35 @@ def test_inbound_poll_detects_incoming_call_phrase():
     lis._pj = _FakePj()  # type: ignore[assignment]
     assert lis.poll() == "incoming"
     assert lis._phase == "ringing"
+
+
+def test_cli_from_sip_log_finds_e164():
+    from operator_os.sip import _cli_from_sip_log
+
+    text = "Incoming call\nFrom: <sip:+12025551212@sip.telnyx.com>"
+    assert _cli_from_sip_log(text) == "+12025551212"
+
+
+def test_outbound_remote_ended_on_disconnected():
+    from operator_os.sip import SipCallSession
+
+    class _FakePj:
+        alive = True
+        log = "CONFIRMED\n"
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def read_log(self) -> str:
+            return self.log
+
+    sess = SipCallSession(
+        e164="+16176754444",
+        credentials=SipCredentials(username="u", password="p", caller_id="+12025550100"),
+    )
+    pj = _FakePj()
+    sess._pj = pj  # type: ignore[assignment]
+    sess._log_mark = len(pj.log)
+    assert sess.remote_ended() is False
+    pj.log += "state changed to DISCONNECTED\n"
+    assert sess.remote_ended() is True

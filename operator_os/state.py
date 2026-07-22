@@ -19,6 +19,7 @@ class State(str, Enum):
     PLAYING_SERVICE = "PLAYING_SERVICE"
     OUTSIDE_LINE = "OUTSIDE_LINE"  # seized trunk; collecting destination digits
     SIP_CALL = "SIP_CALL"  # live Telnyx call
+    VOICEMAIL = "VOICEMAIL"  # on-hook miss: answered + recording
     DIAGNOSTIC = "DIAGNOSTIC"
     ERROR = "ERROR"
 
@@ -70,6 +71,11 @@ def _transition(state: State, event: Event) -> Transition:
         actions: tuple[str, ...] = ("audio_stop", "ring_stop", "sip_hangup")
         return Transition(State.ON_HOOK_IDLE, actions=actions, reason="hangup")
 
+    # Hook flash / double-flash: valid inputs everywhere; default is no-op.
+    # Later blocks bind these (info desk end-utterance, VM next, in-call menus).
+    if et in ("hook_flash", "hook_flash_2"):
+        return Transition(state, reason=et)
+
     if state == State.ON_HOOK_IDLE:
         if et == "off_hook":
             return Transition(State.DIAL_TONE, actions=("dial_tone",), reason="off_hook")
@@ -84,11 +90,29 @@ def _transition(state: State, event: Event) -> Transition:
                 actions=("ring_stop", "sip_answer"),
                 reason="answered",
             )
+        if et == "voicemail_answer":
+            return Transition(
+                State.VOICEMAIL,
+                actions=("ring_stop", "sip_answer"),
+                reason="voicemail",
+            )
         if et in ("ring_stop", "incoming_cancel"):
             return Transition(
                 State.ON_HOOK_IDLE,
                 actions=("ring_stop", "sip_hangup"),
                 reason="incoming_cancel" if et == "incoming_cancel" else "ring_stop",
+            )
+        return Transition(state)
+
+    if state == State.VOICEMAIL:
+        # Cradle is already down; off-hook intercepts into a live call.
+        if et == "off_hook":
+            return Transition(State.SIP_CALL, reason="vm_intercept")
+        if et == "vm_done":
+            return Transition(
+                State.ON_HOOK_IDLE,
+                actions=("sip_hangup",),
+                reason="vm_done",
             )
         return Transition(state)
 
@@ -160,6 +184,12 @@ def _transition(state: State, event: Event) -> Transition:
         return Transition(state)
 
     if state == State.PLAYING_SERVICE:
+        if et == "place_call":
+            return Transition(
+                State.SIP_CALL,
+                actions=("audio_stop", "sip_dial"),
+                reason="join_meeting",
+            )
         if et == "service_done":
             return Transition(
                 State.DIAL_TONE,

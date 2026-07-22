@@ -51,7 +51,7 @@ _WMO: dict[int, str] = {
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
-    """Minimal .env loader — no dependency. Does not override existing env."""
+    """Minimal .env loader — no dependency. Fills missing or empty keys from file."""
     if not path.is_file():
         return
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -61,7 +61,7 @@ def load_dotenv(path: Path = Path(".env")) -> None:
         key, _, val = line.partition("=")
         key = key.strip()
         val = val.strip().strip("'").strip('"')
-        if key and key not in os.environ:
+        if key and not os.environ.get(key, "").strip():
             os.environ[key] = val
 
 

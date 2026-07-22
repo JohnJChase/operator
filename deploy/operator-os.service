@@ -1,7 +1,10 @@
 [Unit]
 Description=WE302 Operator OS (Western Electric 302 exchange)
-After=multi-user.target sound.target
+# sound for ALSA; network-online for SIP/SMS; tailscaled so Funnel is up before webhook.
+After=multi-user.target sound.target network-online.target tailscaled.service
 Wants=network-online.target
+# Funnel config lives in Tailscale state (`tailscale funnel --bg`); tailscaled
+# restores it on boot. operator-os must listen on 127.0.0.1:8787 for SMS.
 
 [Service]
 Type=simple
@@ -10,7 +13,7 @@ Group=john
 WorkingDirectory=/home/john/operator
 Environment=PATH=/home/john/.local/bin:/usr/bin
 # Prefer uv so the project venv + system-site-packages gpio stack stay consistent.
-ExecStart=/home/john/.local/bin/uv run operator-os run --config config/hardware_profile.yaml
+ExecStart=/home/john/.local/bin/uv run operator-os --config config/hardware_profile.yaml run
 Restart=on-failure
 RestartSec=3
 # Fail safe: kill leftover aplay/arecord on stop.

@@ -70,21 +70,75 @@ TOOL_DEFS: list[dict[str, Any]] = [
     ),
     _fn(
         "prepare_message",
-        "Draft an SMS/message. Requires confirm_message. Sending needs a provider.",
+        "Draft an SMS to an E.164 number. Requires confirm_message before send.",
         {
             "type": "object",
-            "properties": {"text": {"type": "string"}},
-            "required": ["text"],
+            "properties": {
+                "to": {
+                    "type": "string",
+                    "description": "Destination phone number (10-digit US or +E.164).",
+                },
+                "text": {"type": "string", "description": "Message body."},
+            },
+            "required": ["to", "text"],
             "additionalProperties": False,
         },
     ),
     _fn(
         "confirm_message",
-        "Confirm or cancel a prepared message draft.",
+        "Confirm or cancel a prepared SMS draft. Confirm sends via Telnyx.",
         {
             "type": "object",
             "properties": {"confirmed": {"type": "boolean"}},
             "required": ["confirmed"],
+            "additionalProperties": False,
+        },
+    ),
+    _fn(
+        "list_messages",
+        "List unheard inbound SMS (ids and from numbers only; no full bodies).",
+    ),
+    _fn(
+        "read_message",
+        "Read one inbound SMS aloud by id and mark it heard.",
+        {
+            "type": "object",
+            "properties": {"message_id": {"type": "integer"}},
+            "required": ["message_id"],
+            "additionalProperties": False,
+        },
+    ),
+    _fn(
+        "list_voicemails",
+        "List unheard voicemails (ids and from numbers only).",
+    ),
+    _fn(
+        "play_voicemail",
+        "Play one voicemail by id on the handset and mark it heard.",
+        {
+            "type": "object",
+            "properties": {"voicemail_id": {"type": "integer"}},
+            "required": ["voicemail_id"],
+            "additionalProperties": False,
+        },
+    ),
+    _fn(
+        "delete_voicemail",
+        "Delete one voicemail by id (WAV and DB row).",
+        {
+            "type": "object",
+            "properties": {"voicemail_id": {"type": "integer"}},
+            "required": ["voicemail_id"],
+            "additionalProperties": False,
+        },
+    ),
+    _fn(
+        "callback_voicemail",
+        "Announce the callback number for a voicemail (caller dials 9 to place the call).",
+        {
+            "type": "object",
+            "properties": {"voicemail_id": {"type": "integer"}},
+            "required": ["voicemail_id"],
             "additionalProperties": False,
         },
     ),
@@ -102,6 +156,7 @@ class LocalTools:
     voice_mode: bool = False
     _outside_draft: bool = False
     _message_draft: str | None = None
+    _message_to: str | None = None
     line_seized: bool = False
 
     def dispatch(self, name: str, arguments: dict[str, Any]) -> str:
@@ -119,6 +174,12 @@ class LocalTools:
             "confirm_outside_line": self.confirm_outside_line,
             "prepare_message": self.prepare_message,
             "confirm_message": self.confirm_message,
+            "list_messages": self.list_messages,
+            "read_message": self.read_message,
+            "list_voicemails": self.list_voicemails,
+            "play_voicemail": self.play_voicemail,
+            "delete_voicemail": self.delete_voicemail,
+            "callback_voicemail": self.callback_voicemail,
         }.get(name)
         if fn is None:
             return json.dumps({"ok": False, "error": f"unknown tool {name}"})
@@ -234,34 +295,203 @@ class LocalTools:
         self.line_seized = True
         return json.dumps({"ok": True, "seized": True})
 
-    def prepare_message(self, text: str) -> str:
+    def prepare_message(self, to: str = "", text: str = "") -> str:
+        from operator_os.sip import normalize_nanp
+
         cleaned = (text or "").strip()
+        dest = normalize_nanp(to or "")
+        if not dest:
+            return json.dumps({"ok": False, "error": "invalid destination number"})
         if not cleaned:
             return json.dumps({"ok": False, "error": "empty message"})
         self._message_draft = cleaned[:500]
-        spoken = "Message drafted. Confirm to send."
+        self._message_to = dest
+        spoken = f"Message to {dest} drafted. Confirm to send."
         return json.dumps(
             {
                 "ok": True,
                 "announce": spoken,
                 "draft": "message",
+                "to": dest,
                 "text": self._message_draft,
                 "next": "confirm_message",
             }
         )
 
     def confirm_message(self, confirmed: bool) -> str:
-        if self._message_draft is None:
-            return json.dumps({"ok": False, "error": "no message draft; prepare first"})
+        draft = self._message_draft
+        dest = self._message_to
         self._message_draft = None
+        self._message_to = None
+        if draft is None or dest is None:
+            return json.dumps({"ok": False, "error": "no message draft; prepare first"})
         if not confirmed:
             return json.dumps({"ok": True, "announce": "Cancelled.", "sent": False})
+        from operator_os import db as store
+        from operator_os.sms import send_sms, sms_configured, sms_from
+
+        if not sms_configured():
+            return json.dumps(
+                {
+                    "ok": False,
+                    "announce": "Messaging is not configured.",
+                    "sent": False,
+                    "error": "messaging provider not configured; message not sent",
+                }
+            )
+        try:
+            result = send_sms(dest, draft)
+            store.insert_outbound(
+                to_e164=result.to_e164,
+                from_e164=result.from_e164 or sms_from(),
+                body=result.body,
+                telnyx_id=result.telnyx_id or None,
+            )
+            return json.dumps(
+                {
+                    "ok": True,
+                    "announce": "Sent.",
+                    "sent": True,
+                    "to": result.to_e164,
+                }
+            )
+        except Exception as e:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "announce": "Unable to send the message.",
+                    "sent": False,
+                    "error": str(e)[:160],
+                }
+            )
+
+    def list_messages(self) -> str:
+        from operator_os import db as store
+        from operator_os.sip import speak_phone_number
+
+        rows = store.list_unheard(limit=10)
+        if not rows:
+            return json.dumps(
+                {"ok": True, "announce": "No unheard messages.", "messages": []}
+            )
+        parts = []
+        summary = []
+        for m in rows:
+            who = speak_phone_number(m.from_e164) if m.from_e164 else "unknown"
+            parts.append(f"number {m.id} from {who}")
+            summary.append({"id": m.id, "from": m.from_e164})
+        spoken = "Unheard messages: " + "; ".join(parts) + "."
+        return json.dumps({"ok": True, "announce": spoken, "messages": summary})
+
+    def read_message(self, message_id: int = 0) -> str:
+        from operator_os import db as store
+        from operator_os.sip import speak_phone_number
+
+        msg = store.get_message(int(message_id))
+        if msg is None or msg.direction != "in":
+            return json.dumps({"ok": False, "error": "message not found"})
+        store.mark_heard(msg.id)
+        who = speak_phone_number(msg.from_e164) if msg.from_e164 else "unknown"
+        spoken = f"Message from {who}: {msg.body}"
         return json.dumps(
             {
-                "ok": False,
-                "announce": "Messaging is not configured.",
-                "sent": False,
-                "error": "messaging provider not configured; message not sent",
+                "ok": True,
+                "announce": spoken,
+                "message_id": msg.id,
+                "heard": True,
+            }
+        )
+
+    def list_voicemails(self) -> str:
+        from operator_os import db as store
+        from operator_os.sip import speak_phone_number
+
+        rows = store.list_unheard_voicemails(limit=10)
+        if not rows:
+            return json.dumps(
+                {"ok": True, "announce": "No new voicemail.", "voicemails": []}
+            )
+        parts = []
+        summary = []
+        for vm in rows:
+            who = speak_phone_number(vm.from_e164) if vm.from_e164 else "unknown"
+            parts.append(f"number {vm.id} from {who}")
+            summary.append({"id": vm.id, "from": vm.from_e164})
+        spoken = "New voicemail: " + "; ".join(parts) + "."
+        return json.dumps({"ok": True, "announce": spoken, "voicemails": summary})
+
+    def play_voicemail(self, voicemail_id: int = 0) -> str:
+        from pathlib import Path
+
+        from operator_os import db as store
+        from operator_os.sip import speak_phone_number
+
+        vm = store.get_voicemail(int(voicemail_id))
+        if vm is None:
+            return json.dumps({"ok": False, "error": "voicemail not found"})
+        who = speak_phone_number(vm.from_e164) if vm.from_e164 else "unknown"
+        path = Path(vm.path)
+        if not path.is_file() or path.stat().st_size < 44:
+            store.mark_voicemail_heard(vm.id)
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": "recording missing",
+                    "announce": f"Voicemail {vm.id} from {who} has no recording.",
+                }
+            )
+        # Always play WAV on the handset (model cannot speak audio).
+        self.audio.speak(f"Voicemail from {who}.", wait=True)
+        self.audio.play_file(path, wait=True)
+        store.mark_voicemail_heard(vm.id)
+        return json.dumps(
+            {
+                "ok": True,
+                "announce": f"Played voicemail {vm.id}.",
+                "voicemail_id": vm.id,
+                "heard": True,
+            }
+        )
+
+    def delete_voicemail(self, voicemail_id: int = 0) -> str:
+        from operator_os import db as store
+
+        ok = store.delete_voicemail(int(voicemail_id))
+        if not ok:
+            return json.dumps({"ok": False, "error": "voicemail not found"})
+        return json.dumps(
+            {
+                "ok": True,
+                "announce": "Deleted.",
+                "voicemail_id": int(voicemail_id),
+            }
+        )
+
+    def callback_voicemail(self, voicemail_id: int = 0) -> str:
+        from operator_os import db as store
+        from operator_os.sip import speak_phone_number
+
+        vm = store.get_voicemail(int(voicemail_id))
+        if vm is None:
+            return json.dumps({"ok": False, "error": "voicemail not found"})
+        if not vm.from_e164:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": "no caller id",
+                    "announce": "That voicemail has no callback number.",
+                }
+            )
+        who = speak_phone_number(vm.from_e164)
+        spoken = (
+            f"The number is {who}. Hang up and dial 9, then that number, to call back."
+        )
+        return json.dumps(
+            {
+                "ok": True,
+                "announce": spoken,
+                "voicemail_id": vm.id,
+                "from": vm.from_e164,
             }
         )
 

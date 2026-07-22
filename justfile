@@ -85,11 +85,18 @@ crossbar-test:
 operator-test text="What is the weather?":
     uv run operator-os operator-test --text "{{text}}"
 
-realtime-tune:
-    uv run operator-os realtime-tune
+# Browser OAuth on this Pi → writes GOOGLE_OAUTH_REFRESH_TOKEN into .env
+calendar-auth *args:
+    uv run operator-os calendar-auth {{args}}
 
-realtime-autotune:
-    uv run operator-os realtime-autotune
+# Positional args (just does not use name=value for recipe params):
+#   just sms-inject +12023061203 'desk test'
+sms-inject sender="+15551234567" body="Test message":
+    uv run operator-os sms-inject --from "{{sender}}" --text "{{body}}"
+
+#   just sms-send +15551234567 'hello'
+sms-send to="+15551234567" text="hello":
+    uv run operator-os sms-send --to "{{to}}" --text "{{text}}"
 
 refresh *args:
     uv run operator-os refresh {{args}}

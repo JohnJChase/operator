@@ -15,6 +15,86 @@ PulseCallback = Callable[[], None]
 HookCallback = Callable[[bool], None]
 
 
+@dataclass
+class HookFlashClassifier:
+    """Split cradle dips into flash / double-flash / hangup using profile timings.
+
+    While the cradle is down we wait: a short return to off-hook is a flash
+    (audio stays up). Staying down past hangup_min is a real hangup.
+    """
+
+    flash_min_s: float
+    flash_max_s: float
+    hangup_min_s: float
+    double_window_s: float = 0.45
+    _pending_onhook_at: float | None = field(default=None, init=False, repr=False)
+    _last_flash_at: float | None = field(default=None, init=False, repr=False)
+    _hangup_emitted: bool = field(default=False, init=False, repr=False)
+
+    @classmethod
+    def from_profile(cls, profile: HardwareProfile) -> "HookFlashClassifier":
+        h = profile.hook
+        return cls(
+            flash_min_s=h.flash_min_ms / 1000.0,
+            flash_max_s=h.flash_max_ms / 1000.0,
+            hangup_min_s=h.hangup_min_ms / 1000.0,
+        )
+
+    def feed(self, off_hook: bool, *, now: float | None = None) -> list[str]:
+        """Consume a raw hook edge. Returns event names: off_hook, hook_flash, hook_flash_2."""
+        t = time.monotonic() if now is None else now
+        out: list[str] = []
+        if off_hook:
+            if self._pending_onhook_at is None:
+                # Already off-hook or first lift; still announce off_hook for FSM.
+                out.append("off_hook")
+                self._hangup_emitted = False
+                return out
+            dt = t - self._pending_onhook_at
+            self._pending_onhook_at = None
+            if self._hangup_emitted:
+                # Hangup already fired while cradle was down; this is a new lift.
+                self._hangup_emitted = False
+                out.append("off_hook")
+                return out
+            if self.flash_min_s <= dt <= self.flash_max_s:
+                if (
+                    self._last_flash_at is not None
+                    and (t - self._last_flash_at) <= self.double_window_s
+                ):
+                    out.append("hook_flash_2")
+                else:
+                    out.append("hook_flash")
+                self._last_flash_at = t
+                return out
+            if dt < self.flash_min_s:
+                # Bounce — ignore.
+                return out
+            # Longer than flash_max but hangup poll hasn't fired yet: treat as hangup
+            # then immediate off_hook so the line recovers.
+            out.append("on_hook")
+            out.append("off_hook")
+            self._hangup_emitted = False
+            return out
+
+        # Going on-hook: start timing; hangup comes from poll() if they stay down.
+        self._pending_onhook_at = t
+        self._hangup_emitted = False
+        return out
+
+    def poll(self, *, on_hook: bool, now: float | None = None) -> list[str]:
+        """While cradle is down, emit on_hook once hangup_min elapses."""
+        t = time.monotonic() if now is None else now
+        if not on_hook or self._pending_onhook_at is None or self._hangup_emitted:
+            return []
+        if t - self._pending_onhook_at >= self.hangup_min_s:
+            self._hangup_emitted = True
+            self._pending_onhook_at = None
+            self._last_flash_at = None
+            return ["on_hook"]
+        return []
+
+
 class PhoneIO:
     """Common phone I/O surface used by the state loop."""
 

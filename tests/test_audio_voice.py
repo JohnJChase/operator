@@ -106,9 +106,15 @@ def test_drain_hooks_before_pulses():
     q.put(("hook", False))
     q.put(("pulse", 2))
     q.put(("hook", True))
-    hooks, pulses = _drain_prioritized(q)
+    hooks, pulses, sms_ids = _drain_prioritized(q)
     assert hooks == [False, True]
     assert pulses == [1, 2]
+    assert sms_ids == []
+    q.put(("sms", 42))
+    q.put(("hook", True))
+    hooks, pulses, sms_ids = _drain_prioritized(q)
+    assert hooks == [True]
+    assert sms_ids == [42]
 
 
 def test_notify_hangup_is_hardware_cutoff():

@@ -76,6 +76,17 @@ def test_outside_place_call_and_hangup():
     assert "sip_hangup" in tr.actions
 
 
+def test_join_meeting_place_call_from_playing_service():
+    ctl = PhoneController()
+    ctl.handle(Event("off_hook"))
+    ctl.handle(Event("digit", value=7))
+    assert ctl.state == State.PLAYING_SERVICE
+    tr = ctl.handle(Event("place_call"))
+    assert ctl.state == State.SIP_CALL
+    assert "sip_dial" in tr.actions
+    assert tr.reason == "join_meeting"
+
+
 def test_outside_cancel_returns_dial_tone():
     ctl = PhoneController()
     ctl.handle(Event("off_hook"))
@@ -112,3 +123,24 @@ def test_inbound_cancel_returns_idle():
     assert ctl.state == State.ON_HOOK_IDLE
     assert "ring_stop" in tr.actions
     assert "sip_hangup" in tr.actions
+
+
+def test_inbound_timeout_to_voicemail():
+    ctl = PhoneController()
+    ctl.handle(Event("ring_start"))
+    tr = ctl.handle(Event("voicemail_answer"))
+    assert ctl.state == State.VOICEMAIL
+    assert "ring_stop" in tr.actions
+    assert "sip_answer" in tr.actions
+    tr = ctl.handle(Event("vm_done"))
+    assert ctl.state == State.ON_HOOK_IDLE
+    assert "sip_hangup" in tr.actions
+
+
+def test_voicemail_intercept_to_sip_call():
+    ctl = PhoneController()
+    ctl.handle(Event("ring_start"))
+    ctl.handle(Event("voicemail_answer"))
+    tr = ctl.handle(Event("off_hook"))
+    assert ctl.state == State.SIP_CALL
+    assert tr.reason == "vm_intercept"

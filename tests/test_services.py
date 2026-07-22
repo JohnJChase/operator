@@ -34,14 +34,31 @@ def test_digit_four_nws_stream():
     assert "weather" in r.text.lower()
 
 
+def test_digit_seven_join_meeting():
+    r = handle_digit(7)
+    assert r.kind == "join_meeting"
+
+
+def test_digit_five_mailbox():
+    r = handle_digit(5)
+    assert r.kind == "mailbox"
+
+
+def test_digit_zero_menu_mentions_meeting_and_desk():
+    r = handle_digit(0)
+    assert "7 to join a meeting" in r.text
+    assert "8 for the information desk" in r.text
+    assert "5 for voicemail" in r.text
+
+
 def test_digit_zero_menu_mentions_weather_radio():
     r = handle_digit(0)
     assert "4 for weather radio" in r.text
 
 
-def test_digit_eight_realtime():
+def test_digit_eight_info_desk():
     r = handle_digit(8)
-    assert r.kind == "realtime_operator"
+    assert r.kind == "info_desk"
 
 
 def test_digit_nine_outside_seize():

@@ -52,16 +52,30 @@ def main(argv: list[str] | None = None) -> None:
     sp = sub.add_parser("speak-test", help="speak a phrase (reports Piper vs espeak)")
     sp.add_argument("--text", default="This is the operator.")
     sub.add_parser("crossbar-test", help="play outside-line seize click + dial tone")
-    ot = sub.add_parser("operator-test", help="Realtime operator smoke (WS session)")
+    ot = sub.add_parser("operator-test", help="info desk text smoke (no mic)")
     ot.add_argument("--text", default="What is the weather?")
-    sub.add_parser(
-        "realtime-tune",
-        help="interactive Realtime mic/VAD tuning bench (live RMS + knobs)",
+    ca = sub.add_parser(
+        "calendar-auth",
+        help="OAuth: write GOOGLE_OAUTH_REFRESH_TOKEN to .env (digit 7)",
     )
-    sub.add_parser(
-        "realtime-autotune",
-        help="guided Realtime autotune (scripted prompts + mic/response measure)",
+    ca.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="print URL only; do not open a browser",
     )
+    inj = sub.add_parser("sms-inject", help="POST a fake inbound SMS to local webhook")
+    inj.add_argument("--from", dest="sms_from", required=True, help="E.164 or 10-digit from")
+    inj.add_argument("--text", required=True, help="message body")
+    inj.add_argument("--to", default="", help="destination (default TELNYX_SMS_FROM)")
+    inj.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="webhook port (default OPERATOR_SMS_WEBHOOK_PORT or 8787)",
+    )
+    snd = sub.add_parser("sms-send", help="send one outbound SMS via Telnyx")
+    snd.add_argument("--to", required=True)
+    snd.add_argument("--text", required=True)
     sub.add_parser("status", help="print profile and current state summary")
     ref = sub.add_parser("refresh", help="fetch and cache news/weather")
     ref.add_argument("--weather", action="store_true", help="refresh weather only")
@@ -95,28 +109,29 @@ def main(argv: list[str] | None = None) -> None:
 
         raise SystemExit(crossbar_test(profile))
     if args.cmd == "operator-test":
+        from operator_os.info_desk import UNAVAILABLE, info_desk_text_smoke
         from operator_os.openai_client import api_key_from_env
-        from operator_os.realtime_operator import UNAVAILABLE, realtime_text_smoke
 
         key = api_key_from_env()
         if not key:
             print(UNAVAILABLE, file=sys.stderr)
             raise SystemExit(1)
         try:
-            reply = realtime_text_smoke(key, args.text, profile=profile)
+            audio = AudioRouter(profile.audio)
+            reply = info_desk_text_smoke(args.text, profile=profile, audio=audio)
             print(f"operator: {reply}")
             raise SystemExit(0 if reply else 1)
         except Exception as e:
             print(f"operator-test failed: {e}", file=sys.stderr)
             raise SystemExit(1) from e
-    if args.cmd == "realtime-tune":
-        from operator_os.realtime_tune import run_realtime_tune
+    if args.cmd == "calendar-auth":
+        from operator_os.google_calendar import run_calendar_auth
 
-        raise SystemExit(run_realtime_tune(profile, profile_path=args.config))
-    if args.cmd == "realtime-autotune":
-        from operator_os.realtime_autotune import run_realtime_autotune
-
-        raise SystemExit(run_realtime_autotune(profile, profile_path=args.config))
+        raise SystemExit(run_calendar_auth(open_browser=not args.no_browser))
+    if args.cmd == "sms-inject":
+        raise SystemExit(_sms_inject(args))
+    if args.cmd == "sms-send":
+        raise SystemExit(_sms_send_cli(args))
     if args.cmd == "refresh":
         from operator_os.refresh import refresh_all
 
@@ -143,6 +158,73 @@ def main(argv: list[str] | None = None) -> None:
             audio.close()
 
 
+def _sms_inject(args: argparse.Namespace) -> int:
+    import json
+    import urllib.error
+    import urllib.request
+
+    from operator_os.sms import WEBHOOK_PATH, INJECT_HEADER, inject_token, webhook_port
+
+    def _strip_label(raw: str, *labels: str) -> str:
+        s = (raw or "").strip()
+        for label in labels:
+            prefix = f"{label}="
+            if s.lower().startswith(prefix):
+                return s[len(prefix) :].strip()
+        return s
+
+    from_num = _strip_label(args.sms_from, "from", "sender")
+    text = _strip_label(args.text, "text", "body")
+    to_num = _strip_label(args.to, "to") if args.to else ""
+
+    port = int(args.port) if args.port else webhook_port()
+    payload = {
+        "telnyx_id": f"inject-{int(time.time() * 1000)}",
+        "from": from_num,
+        "to": to_num,
+        "text": text,
+    }
+    url = f"http://127.0.0.1:{port}{WEBHOOK_PATH}"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            INJECT_HEADER: inject_token(),
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            print(f"sms-inject ok ({resp.status}) → {url}")
+            return 0
+    except urllib.error.URLError as e:
+        print(f"sms-inject failed: {e} (is `just run` up?)", file=sys.stderr)
+        return 1
+
+
+def _sms_send_cli(args: argparse.Namespace) -> int:
+    from operator_os import db as store
+    from operator_os.sms import send_sms, sms_configured, sms_from
+
+    if not sms_configured():
+        print("SMS not configured (TELNYX_API_KEY + from number)", file=sys.stderr)
+        return 1
+    try:
+        result = send_sms(args.to, args.text)
+        store.insert_outbound(
+            to_e164=result.to_e164,
+            from_e164=result.from_e164 or sms_from(),
+            body=result.body,
+            telnyx_id=result.telnyx_id or None,
+        )
+        print(f"sent to {result.to_e164} id={result.telnyx_id or '?'}")
+        return 0
+    except Exception as e:
+        print(f"sms-send failed: {e}", file=sys.stderr)
+        return 1
+
+
 def run_loop(
     phone: PhoneIO,
     audio: AudioRouter,
@@ -165,12 +247,23 @@ def run_loop(
     import queue
 
     from operator_os.refresh import load_dotenv
+    from operator_os.phone import HookFlashClassifier
     from operator_os.sip import (
         SipCallSession,
         SipCredentials,
         SipInboundListener,
+        VM_DIR,
+        discard_active_recording,
         normalize_nanp,
         sip_configured,
+        take_active_recording,
+        wav_duration_s,
+    )
+    from operator_os.sms import (
+        WEBHOOK_PATH,
+        SmsWebhookServer,
+        attach_notify_queue,
+        sms_configured,
     )
 
     load_dotenv()
@@ -184,18 +277,28 @@ def run_loop(
     sip_session: SipCallSession | SipInboundListener | None = None
     inbound: SipInboundListener | None = None
     sip_dest: str | None = None
+    sip_dtmf: str = ""
     outside_digits = ""
     outside_last_at: float | None = None
     ring_started_at: float | None = None
+    sms_announce_id: int | None = None
+    sms_ring_deadline: float | None = None
+    vm_until: float | None = None
     interdigit_s = float(profile.raw.get("timing", {}).get("outside_number_interdigit_timeout_ms", 2000)) / 1000.0
     inbound_ring_s = float(profile.raw.get("timing", {}).get("inbound_ring_timeout_ms", 45000)) / 1000.0
+    sms_ring_s = float(profile.raw.get("timing", {}).get("sms_ring_timeout_ms", 20000)) / 1000.0
+    vm_record_s = float(profile.raw.get("timing", {}).get("voicemail_record_ms", 30000)) / 1000.0
     alsa_device = profile.audio.alsa_device
+    hook_clf = HookFlashClassifier.from_profile(profile)
+    sms_webhook: SmsWebhookServer | None = None
 
     def _status(msg: str) -> None:
         print(msg, flush=True)
 
-    def _hangup_sip() -> None:
-        nonlocal sip_session, sip_dest, inbound, ring_started_at
+    def _hangup_sip(*, discard_rec: bool = True) -> None:
+        nonlocal sip_session, sip_dest, sip_dtmf, inbound, ring_started_at, vm_until
+        if discard_rec:
+            discard_active_recording()
         if sip_session is not None:
             sip_session.hangup()
             sip_session = None
@@ -203,7 +306,9 @@ def run_loop(
             inbound.hangup()
             inbound = None
         sip_dest = None
+        sip_dtmf = ""
         ring_started_at = None
+        vm_until = None
 
     def _stop_inbound() -> None:
         nonlocal inbound
@@ -240,11 +345,12 @@ def run_loop(
             events.emit("sip", value="inbound_error", detail=str(e)[:120])
 
     def apply(tr) -> None:
-        nonlocal await_service_done, op_session, sip_session, sip_dest, inbound
-        nonlocal outside_digits, outside_last_at, ring_started_at
+        nonlocal await_service_done, op_session, sip_session, sip_dest, sip_dtmf, inbound
+        nonlocal outside_digits, outside_last_at, ring_started_at, vm_until
         for action in tr.actions:
             if action == "sip_hangup":
-                _hangup_sip()
+                # Keep conference WAV across vm_done so we can archive it after flush.
+                _hangup_sip(discard_rec=(tr.reason != "vm_done"))
                 events.emit("sip", value="hangup")
                 continue
             if action == "sip_answer":
@@ -271,6 +377,7 @@ def run_loop(
             outside_digits = ""
             outside_last_at = None
             ring_started_at = None
+            vm_until = None
             if op_session is not None:
                 op_session.cancel_now()
                 op_session = None
@@ -279,6 +386,7 @@ def run_loop(
                 sip_session.hangup()
                 sip_session = None
             sip_dest = None
+            sip_dtmf = ""
             _ensure_inbound()
         elif ctl.state in (
             State.DIAL_TONE,
@@ -292,9 +400,70 @@ def run_loop(
             outside_digits = ""
             outside_last_at = None
 
+    def _vm_safe_name(e164: str) -> str:
+        digits = "".join(c for c in (e164 or "") if c.isdigit())
+        return digits or "unknown"
+
+    def _begin_voicemail() -> None:
+        """Greet caller then open the record window. Ceiling: Piper may fight pjsua ALSA."""
+        nonlocal vm_until
+        if not live_audio or sip_session is None:
+            return
+        # Allow speak while cradle is down so greeting can try the shared device.
+        audio.set_hook(True)
+        try:
+            audio.speak(
+                "The party you called is not available. "
+                "Please leave a message after the tone.",
+                wait=True,
+            )
+            try:
+                audio.play_tone(880.0, seconds=0.35, wait=True)
+            except Exception:
+                pass
+        except Exception as e:
+            _status(f"vm: greet failed {e}")
+        finally:
+            audio.set_hook(False)
+        vm_until = time.monotonic() + vm_record_s
+        events.emit("voicemail", value="recording")
+        _status(f"vm: recording up to {vm_record_s:.0f}s")
+
+    def _complete_voicemail(*, save: bool) -> None:
+        """Hang up the miss leg; optionally keep the conference WAV + DB row."""
+        nonlocal sip_session, vm_until
+        from operator_os import db as store
+
+        from_e164 = ""
+        if isinstance(sip_session, SipInboundListener):
+            from_e164 = sip_session.remote_e164()
+        vm_until = None
+        # Hangup first so pjsua flushes the recorder, then move the file.
+        apply(ctl.handle(Event("vm_done")))
+        if not save:
+            discard_active_recording()
+            events.emit("voicemail", value="discarded")
+            return
+        dest = VM_DIR / f"vm_{int(time.time())}_{_vm_safe_name(from_e164)}.wav"
+        path = take_active_recording(dest)
+        if path is None:
+            _status("vm: no audio captured")
+            events.emit("voicemail", value="empty")
+            return
+        dur = wav_duration_s(path)
+        row = store.insert_voicemail(
+            from_e164=from_e164 or "",
+            path=str(path),
+            duration_s=dur,
+        )
+        events.emit("voicemail", value="saved", digit=row.id)
+        _status(f"vm: saved id={row.id} from={from_e164 or '?'} ({dur:.1f}s)")
+
     def _start_sip_call() -> None:
-        nonlocal sip_session, sip_dest
+        nonlocal sip_session, sip_dest, sip_dtmf
         dest = sip_dest
+        pin = sip_dtmf
+        sip_dtmf = ""
         if not dest or not live_audio:
             return
         creds = SipCredentials.from_env()
@@ -304,7 +473,12 @@ def run_loop(
         audio.stop()
         try:
             _status(f"sip: dialing {dest}")
-            sess = SipCallSession(e164=dest, credentials=creds, alsa_device=alsa_device)
+            sess = SipCallSession(
+                e164=dest,
+                credentials=creds,
+                alsa_device=alsa_device,
+                dtmf_after_confirm=pin,
+            )
             sess.start()
             sip_session = sess
             events.emit("sip", value="dial", detail=dest)
@@ -314,16 +488,146 @@ def run_loop(
             events.emit("sip", value="error", detail=str(e)[:120])
             audio.speak("Unable to complete the call.", wait=False)
 
+    def _start_join_meeting() -> bool:
+        """Look up Calendar Meet dial-in; set sip_dest/sip_dtmf. Speak on failure.
+
+        Returns True if place_call should follow.
+        """
+        nonlocal await_service_done, sip_dest, sip_dtmf
+        from operator_os.google_calendar import calendar_configured, pick_meeting_to_join
+
+        if not calendar_configured():
+            audio.speak("Calendar is not linked. Run calendar auth on the Pi.", wait=False)
+            await_service_done = True
+            return False
+        if not sip_configured():
+            audio.speak("Outside line is not configured.", wait=False)
+            await_service_done = True
+            return False
+        try:
+            meet, reason = pick_meeting_to_join()
+        except Exception as e:
+            _status(f"calendar: {e}")
+            events.emit("calendar", value="error", detail=str(e)[:120])
+            audio.speak("Unable to read the calendar.", wait=False)
+            await_service_done = True
+            return False
+        if meet is None:
+            audio.speak(reason or "No meeting found.", wait=False)
+            await_service_done = True
+            return False
+        title = " ".join((meet.title or "").split()) or "the meeting"
+        if len(title) > 48:
+            title = title[:45].rstrip() + "…"
+        # Must finish before place_call's audio_stop / sip_dial or the phrase is cut.
+        audio.speak(f"Connecting to {title}.", wait=True)
+        events.emit("calendar", value="join", detail=meet.e164)
+        sip_dest = meet.e164
+        # Meet expects PIN then #.
+        pin = meet.pin.strip()
+        if pin and not pin.endswith("#"):
+            pin = pin + "#"
+        sip_dtmf = pin
+        return True
+
     def on_hook_isr(off_hook: bool) -> None:
-        nonlocal await_service_done, op_session
-        # Interrupt path: silence first, then ask main loop for state change.
-        if not off_hook:
-            await_service_done = False  # don't treat kill as "service finished"
-            if op_session is not None:
-                op_session.cancel_now()
-            _hangup_sip()
-            audio.notify_hangup()
+        # Raw edges only — flash vs hangup is classified on the main loop so a
+        # quick cradle tap does not kill audio / SIP.
         q.put(("hook", off_hook))
+
+    def _stop_sms_ring() -> None:
+        nonlocal sms_announce_id, sms_ring_deadline
+        if sms_announce_id is not None or sms_ring_deadline is not None:
+            try:
+                phone.ring_stop()
+            except Exception:
+                pass
+        sms_announce_id = None
+        sms_ring_deadline = None
+
+    def _speak_inbound_sms(message_id: int) -> None:
+        from operator_os import db as store
+
+        msg = store.get_message(message_id)
+        if msg is None:
+            return
+        who = msg.from_e164 or "unknown"
+        from operator_os.sip import speak_phone_number
+
+        spoken_from = speak_phone_number(who) if who != "unknown" else "unknown"
+        audio.speak(f"Message from {spoken_from}: {msg.body}", wait=True)
+        store.mark_heard(message_id)
+        events.emit("sms", value="heard", digit=message_id)
+
+    def _handle_sms_notify(message_id: int) -> None:
+        nonlocal sms_announce_id, sms_ring_deadline
+        if ctl.state != State.ON_HOOK_IDLE or not live_audio:
+            events.emit("sms", value="queued", digit=message_id)
+            _status(f"sms: queued id={message_id}")
+            return
+        if sms_announce_id is not None:
+            events.emit("sms", value="queued", digit=message_id)
+            _status(f"sms: queued id={message_id} (already ringing)")
+            return
+        sms_announce_id = message_id
+        sms_ring_deadline = time.monotonic() + sms_ring_s
+        events.emit("sms", value="ring", digit=message_id)
+        _status(f"sms: ringing for id={message_id}")
+        try:
+            phone.ring_start()
+        except Exception as e:
+            _status(f"sms: ring failed {e}")
+            sms_announce_id = None
+            sms_ring_deadline = None
+
+    def _apply_hook_event(kind: str) -> None:
+        nonlocal await_service_done, op_session, outside_digits, outside_last_at
+        nonlocal ring_started_at, vm_until
+        if kind == "off_hook":
+            events.emit("hook", value="off_hook")
+            _status("hook=OFF_HOOK")
+            pending_sms = sms_announce_id
+            if pending_sms is not None:
+                _stop_sms_ring()
+            # Intercept voicemail: keep the live SIP leg, drop the recording.
+            if ctl.state == State.VOICEMAIL:
+                discard_active_recording()
+                vm_until = None
+            apply(ctl.handle(Event("off_hook")))
+            audio.set_hook(True)
+            if pending_sms is not None and live_audio:
+                audio.stop()
+                _speak_inbound_sms(pending_sms)
+            return
+        if kind in ("hook_flash", "hook_flash_2"):
+            events.emit("hook", value=kind)
+            _status(f"hook={kind.upper()}")
+            apply(ctl.handle(Event(kind)))
+            # Digit-5 mailbox: flash skips to the next message.
+            if op_session is not None and hasattr(op_session, "skip_now"):
+                try:
+                    op_session.skip_now()
+                except Exception:
+                    pass
+            return
+        # Definite hangup.
+        await_service_done = False
+        if op_session is not None:
+            op_session.cancel_now()
+        _stop_sms_ring()
+        _hangup_sip()
+        audio.notify_hangup()
+        events.emit("hook", value="on_hook")
+        _status("hook=ON_HOOK")
+        apply(ctl.handle(Event("on_hook")))
+        audio.set_hook(False)
+        decoder.reset()
+        outside_digits = ""
+        outside_last_at = None
+        ring_started_at = None
+        if op_session is not None:
+            op_session.cancel_now()
+            op_session = None
 
     phone.on_hook_change(on_hook_isr)
     phone.on_pulse(lambda: q.put(("pulse", decoder.pending_pulses)))
@@ -336,36 +640,47 @@ def run_loop(
         _status("sip: TELNYX_* not set — digit 9 / inbound disabled")
     elif live_audio:
         _ensure_inbound()
+    if live_audio and sms_configured():
+        try:
+            from operator_os import db as store
+
+            store.init_db()
+            sms_webhook = SmsWebhookServer(on_message=attach_notify_queue(q))
+            sms_webhook.start()
+            _status(f"sms: webhook on 127.0.0.1:{sms_webhook.port}{WEBHOOK_PATH}")
+        except Exception as e:
+            sms_webhook = None
+            _status(f"sms: webhook failed {e}")
+    elif live_audio:
+        _status("sms: not configured — inbound webhook off")
     try:
         while True:
             if stop_at and time.monotonic() >= stop_at:
                 return 0
 
-            hooks, pulses = _drain_prioritized(q)
+            hooks, pulses, sms_ids = _drain_prioritized(q)
+            for mid in sms_ids:
+                _handle_sms_notify(mid)
             for off_hook in hooks:
-                if off_hook:
-                    events.emit("hook", value="off_hook")
-                    _status("hook=OFF_HOOK")
-                    apply(ctl.handle(Event("off_hook")))
-                    audio.set_hook(True)
-                else:
-                    events.emit("hook", value="on_hook")
-                    _status("hook=ON_HOOK")
-                    apply(ctl.handle(Event("on_hook")))
-                    audio.set_hook(False)
-                    decoder.reset()
-                    await_service_done = False
-                    outside_digits = ""
-                    outside_last_at = None
-                    ring_started_at = None
-                    if op_session is not None:
-                        op_session.cancel_now()
-                        op_session = None
-                    # on_hook apply already restarts inbound via ON_HOOK_IDLE.
+                for kind in hook_clf.feed(bool(off_hook)):
+                    _apply_hook_event(kind)
+            for kind in hook_clf.poll(on_hook=not phone.is_off_hook()):
+                _apply_hook_event(kind)
             # If we went on-hook, drop pending pulses from this tick.
             if ctl.state == State.ON_HOOK_IDLE:
                 pulses = []
                 decoder.reset()
+
+            # SMS ring timeout → leave message queued.
+            if (
+                sms_announce_id is not None
+                and sms_ring_deadline is not None
+                and time.monotonic() >= sms_ring_deadline
+            ):
+                mid = sms_announce_id
+                _stop_sms_ring()
+                events.emit("sms", value="missed", digit=mid)
+                _status(f"sms: no answer; queued id={mid}")
 
             for pending in pulses:
                 if ctl.state == State.DIAL_TONE:
@@ -396,6 +711,7 @@ def run_loop(
                     ev = inbound.poll()
                     if ev == "ended":
                         _status("sip: caller hung up")
+                        discard_active_recording()
                         apply(ctl.handle(Event("incoming_cancel")))
                         time.sleep(0.02)
                         continue
@@ -403,8 +719,27 @@ def run_loop(
                     ring_started_at is not None
                     and (time.monotonic() - ring_started_at) >= inbound_ring_s
                 ):
-                    _status("sip: inbound ring timeout")
-                    apply(ctl.handle(Event("incoming_cancel")))
+                    _status("sip: inbound ring timeout → voicemail")
+                    apply(ctl.handle(Event("voicemail_answer")))
+                    if ctl.state == State.VOICEMAIL and sip_session is not None:
+                        _begin_voicemail()
+                    elif ctl.state == State.VOICEMAIL:
+                        _status("vm: answer failed; abort")
+                        apply(ctl.handle(Event("vm_done")))
+                    time.sleep(0.02)
+                    continue
+                time.sleep(0.02)
+                continue
+
+            if ctl.state == State.VOICEMAIL:
+                ended = False
+                if sip_session is None or not sip_session.is_alive():
+                    ended = True
+                elif isinstance(sip_session, SipInboundListener):
+                    ended = sip_session.poll() == "ended"
+                timed_out = vm_until is not None and time.monotonic() >= vm_until
+                if ended or timed_out:
+                    _complete_voicemail(save=True)
                     time.sleep(0.02)
                     continue
                 time.sleep(0.02)
@@ -512,25 +847,36 @@ def run_loop(
                         outside_last_at = None
                     elif ctl.state == State.PLAYING_SERVICE:
                         result = handle_digit(digit)
-                        await_service_done, op_session = _play_service(
-                            result, audio, events, live_audio, profile=profile
-                        )
+                        if result.kind == "join_meeting":
+                            if _start_join_meeting():
+                                apply(ctl.handle(Event("place_call")))
+                                if sip_session is None and live_audio:
+                                    apply(ctl.handle(Event("sip_done")))
+                            op_session = None
+                        else:
+                            await_service_done, op_session = _play_service(
+                                result, audio, events, live_audio, profile=profile
+                            )
                     decoder.reset()
                     _flush_queue_pulses(q)
             time.sleep(0.02)
     except KeyboardInterrupt:
         _status("quit")
+        _stop_sms_ring()
         apply(ctl.handle(Event("hangup")))
         _hangup_sip()
+        if sms_webhook is not None:
+            sms_webhook.stop()
         return 0
 
 
-def _drain_prioritized(q) -> tuple[list[bool], list[int]]:
-    """Drain the event queue; hooks are returned first (interrupt priority)."""
+def _drain_prioritized(q) -> tuple[list[bool], list[int], list[int]]:
+    """Drain the event queue; hooks first, then pulses and sms ids."""
     import queue as _queue
 
     hooks: list[bool] = []
     pulses: list[int] = []
+    sms_ids: list[int] = []
     while True:
         try:
             kind, value = q.get_nowait()
@@ -540,11 +886,13 @@ def _drain_prioritized(q) -> tuple[list[bool], list[int]]:
             hooks.append(bool(value))
         elif kind == "pulse":
             pulses.append(int(value))
-    return hooks, pulses
+        elif kind == "sms":
+            sms_ids.append(int(value))
+    return hooks, pulses, sms_ids
 
 
 def _flush_queue_pulses(q) -> None:
-    """Drop queued pulse notifications; keep hook events."""
+    """Drop queued pulse notifications; keep hook and sms events."""
     import queue as _queue
 
     kept: list[tuple] = []
@@ -612,17 +960,26 @@ def _play_service(
     print(f"service digit={result.digit} kind={result.kind}: {result.text or result.path}", flush=True)
     if not live:
         return False, None
-    if result.kind == "realtime_operator":
-        from operator_os.realtime_operator import UNAVAILABLE, start_realtime
+    if result.kind == "info_desk":
+        from operator_os.info_desk import UNAVAILABLE, start_info_desk
 
         if profile is None:
             audio.speak(UNAVAILABLE, wait=False)
             return True, None
-        session = start_realtime(audio, events, profile=profile)
+        session = start_info_desk(audio, events, profile=profile)
         if session is None:
             audio.speak(UNAVAILABLE, wait=False)
             return True, None
         return True, session
+    if result.kind == "mailbox":
+        from operator_os.mailbox import start_mailbox
+
+        session = start_mailbox(audio, events)
+        return True, session
+    if result.kind == "join_meeting":
+        # Live path dials from the main loop; script/sim just announces.
+        audio.speak(result.text or "Join meeting.", wait=False)
+        return True, None
     if result.kind == "outside_seize":
         # fx_outside already ran from the transition; tone runs until hangup.
         return False, None
@@ -662,6 +1019,14 @@ def _run_script(phone: SimulatorPhone, audio: AudioRouter, events: EventLog, scr
             events.emit("hook", value="on_hook")
             events.emit("state", **{"to": tr.state.value, "reason": "hangup"})
             print(f"-> {ctl.state.value}")
+        elif step in ("flash", "hook_flash"):
+            tr = ctl.handle(Event("hook_flash"))
+            events.emit("hook", value="hook_flash")
+            print(f"-> {ctl.state.value} ({tr.reason})")
+        elif step in ("flash2", "hook_flash_2"):
+            tr = ctl.handle(Event("hook_flash_2"))
+            events.emit("hook", value="hook_flash_2")
+            print(f"-> {ctl.state.value} ({tr.reason})")
         elif step.startswith("digit:"):
             digit = int(step.split(":", 1)[1])
             phone.inject_digit(digit, now_ms=now)
@@ -693,7 +1058,7 @@ def _run_script(phone: SimulatorPhone, audio: AudioRouter, events: EventLog, scr
 
 
 def _simulate_repl(phone: SimulatorPhone, audio: AudioRouter, events: EventLog) -> int:
-    print("Simulator. Commands: off | on | digit N | ring | hangup | quit")
+    print("Simulator. Commands: off | on | flash | flash2 | digit N | ring | hangup | quit")
     ctl = PhoneController()
     now = 1000.0
 
@@ -717,6 +1082,14 @@ def _simulate_repl(phone: SimulatorPhone, audio: AudioRouter, events: EventLog) 
             ctl.handle(Event("hangup"))
             audio.stop()
             events.emit("hook", value="on_hook")
+            continue
+        if line.lower() == "flash":
+            ctl.handle(Event("hook_flash"))
+            events.emit("hook", value="hook_flash")
+            continue
+        if line.lower() in ("flash2", "flash_2", "double"):
+            ctl.handle(Event("hook_flash_2"))
+            events.emit("hook", value="hook_flash_2")
             continue
         if line.startswith("digit"):
             parts = line.split()

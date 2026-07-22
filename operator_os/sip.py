@@ -20,6 +20,8 @@ TELNYX_SIP_HOST = "sip.telnyx.com"
 # Avoid default SIP 5060 locally — Telnyx only cares about *its* 5060.
 LOCAL_SIP_PORT = 5080
 LAST_LOG = Path(os.environ.get("OPERATOR_SIP_LAST_LOG", "/tmp/operator-last-pjsua.log"))
+VM_DIR = ROOT / "data" / "voicemail"
+ACTIVE_REC = VM_DIR / "_active.wav"
 
 
 def normalize_nanp(raw: str, *, default_region: str = "1") -> str | None:
@@ -41,6 +43,44 @@ def normalize_nanp(raw: str, *, default_region: str = "1") -> str | None:
         # International without + — require leading country code already present.
         return f"+{digits}"
     return None
+
+
+_DIGIT_WORDS = {
+    "0": "zero",
+    "1": "one",
+    "2": "two",
+    "3": "three",
+    "4": "four",
+    "5": "five",
+    "6": "six",
+    "7": "seven",
+    "8": "eight",
+    "9": "nine",
+}
+
+
+def _speak_digit_group(digits: str) -> str:
+    return " ".join(_DIGIT_WORDS.get(d, d) for d in digits)
+
+
+def speak_phone_number(raw: str) -> str:
+    """TTS-friendly phone: digit words, not a giant integer.
+
+    NANP (+1XXXXXXXXXX) → "two zero two, five five five, one two one two".
+    """
+    digits = re.sub(r"\D", "", raw or "")
+    if not digits:
+        return "unknown"
+    if digits.startswith("1") and len(digits) == 11:
+        digits = digits[1:]
+    if len(digits) == 10:
+        return (
+            f"{_speak_digit_group(digits[:3])}, "
+            f"{_speak_digit_group(digits[3:6])}, "
+            f"{_speak_digit_group(digits[6:])}"
+        )
+    # International / odd lengths: spaced digit words (no comma-as-thousands).
+    return _speak_digit_group(digits)
 
 
 @dataclass
@@ -170,6 +210,23 @@ def _pjsua_media_args(*, null_audio: bool) -> list[str]:
 def sip_configured() -> bool:
     creds = SipCredentials.from_env()
     return creds is not None and bool(creds.caller_id.strip())
+
+
+def _cli_from_sip_log(text: str) -> str:
+    """Best-effort E.164 from pjsua log (From / Contact)."""
+    for pat in (
+        r"sip:(\+\d{8,15})@",
+        r"sip:(\d{10,15})@",
+        r"From:\s*<sip:(\+?\d+)@",
+        r"from.*?(\+1\d{10})\b",
+    ):
+        m = re.search(pat, text, re.I)
+        if not m:
+            continue
+        got = normalize_nanp(m.group(1))
+        if got:
+            return got
+    return ""
 
 
 @dataclass
@@ -368,7 +425,9 @@ class SipCallSession:
     pjsua_path: Path = field(default_factory=lambda: DEFAULT_PJSUA)
     progress_timeout_s: float = 5.0
     null_audio: bool = False
+    dtmf_after_confirm: str = ""
     _pj: _PjsuaProc | None = field(default=None, init=False, repr=False)
+    _log_mark: int = field(default=0, init=False, repr=False)
 
     def start(self) -> None:
         if not self.credentials.caller_id.strip():
@@ -408,9 +467,39 @@ class SipCallSession:
         time.sleep(0.3)
         self._dial()
         self._check_early_progress()
+        if self.dtmf_after_confirm:
+            # Meet answers quickly, then plays "enter PIN" — digits sent too
+            # early are discarded. Wait for CONFIRMED, then for the IVR.
+            deadline = time.monotonic() + 20.0
+            confirmed = False
+            while time.monotonic() < deadline:
+                text = pj.read_log()
+                if "CONFIRMED" in text or "state changed to CONFIRMED" in text:
+                    confirmed = True
+                    break
+                if not pj.is_alive():
+                    break
+                time.sleep(0.1)
+            if confirmed and pj.is_alive():
+                time.sleep(5.5)
+                self.send_dtmf(self.dtmf_after_confirm)
+        # Ignore dial/setup log; only new DISCONNECTED means remote hangup.
+        self._log_mark = len(pj.read_log())
 
     def is_alive(self) -> bool:
         return self._pj is not None and self._pj.is_alive()
+
+    def remote_ended(self) -> bool:
+        """True if the far end hung up (or pjsua died) while we are still off-hook."""
+        pj = self._pj
+        if pj is None or not pj.is_alive():
+            return True
+        text = pj.read_log()
+        chunk = text[self._log_mark :]
+        if "DISCONNECTED" in chunk:
+            self._log_mark = len(text)
+            return True
+        return False
 
     def hangup(self) -> None:
         pj = self._pj
@@ -418,11 +507,24 @@ class SipCallSession:
         if pj is not None:
             pj.hangup()
 
-    def remote_ended(self) -> bool:
+    def send_dtmf(self, digits: str) -> None:
+        """Send RFC 2833 DTMF (Meet PIN, etc.) once the call is up."""
         pj = self._pj
-        if pj is None:
-            return True
-        return "DISCONNECTED" in pj.read_log()
+        if pj is None or not pj.is_alive():
+            return
+        cleaned = re.sub(r"[^0-9*#]", "", digits or "")
+        if not cleaned:
+            return
+        try:
+            print(f"sip: DTMF {cleaned}", flush=True)
+            # pjsua menu: `#` opens RFC 2833 prompt, then the digit string.
+            pj.write(b"#\r")
+            time.sleep(0.35)
+            pj.write((cleaned + "\r").encode())
+            # Give RFC 2833 time to flush before anything else touches the PTY.
+            time.sleep(0.4 + 0.15 * len(cleaned))
+        except OSError:
+            pass
 
     def _dial(self) -> None:
         pj = self._pj
@@ -485,10 +587,16 @@ class SipInboundListener:
     _pj: _PjsuaProc | None = field(default=None, init=False, repr=False)
     _phase: str = field(default="down", init=False, repr=False)  # down|listen|ringing|up
     _mark: int = field(default=0, init=False, repr=False)
+    _remote_e164: str = field(default="", init=False, repr=False)
 
     def start(self) -> None:
         if self._pj is not None:
             return
+        VM_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            ACTIVE_REC.unlink(missing_ok=True)
+        except OSError:
+            pass
         pj = _PjsuaProc(
             credentials=self.credentials,
             alsa_device=self.alsa_device,
@@ -513,6 +621,9 @@ class SipInboundListener:
             f"--local-port={LOCAL_SIP_PORT}",
             "--use-srtp=0",
             "--srtp-secure=0",
+            # Conference-bridge recording for voicemail (kept only on miss).
+            f"--rec-file={ACTIVE_REC}",
+            "--auto-rec",
             *_pjsua_media_args(null_audio=self.null_audio),
         ]
         pj.spawn(cmd)
@@ -526,6 +637,7 @@ class SipInboundListener:
             )
         self._phase = "listen"
         self._mark = len(pj.read_log())
+        self._remote_e164 = ""
 
     def is_alive(self) -> bool:
         return self._pj is not None and self._pj.is_alive()
@@ -546,6 +658,7 @@ class SipInboundListener:
             ):
                 self._phase = "ringing"
                 self._mark = len(text)
+                self._remote_e164 = _cli_from_sip_log(text)
                 return "incoming"
         elif self._phase in ("ringing", "up"):
             if "DISCONNECTED" in chunk:
@@ -556,6 +669,20 @@ class SipInboundListener:
                 self._phase = "up"
                 self._mark = len(text)
         return None
+
+    def remote_e164(self) -> str:
+        if self._remote_e164:
+            return self._remote_e164
+        pj = self._pj
+        if pj is not None:
+            self._remote_e164 = _cli_from_sip_log(pj.read_log())
+        return self._remote_e164
+
+    def take_recording(self, dest: Path) -> Path | None:
+        return take_active_recording(dest)
+
+    def discard_recording(self) -> None:
+        discard_active_recording()
 
     def answer(self) -> None:
         pj = self._pj
@@ -585,3 +712,35 @@ class SipInboundListener:
         self._mark = 0
         if pj is not None:
             pj.hangup()
+
+
+def take_active_recording(dest: Path) -> Path | None:
+    """Move conference recording to dest if present and non-empty."""
+    if not ACTIVE_REC.is_file() or ACTIVE_REC.stat().st_size < 44:
+        return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        ACTIVE_REC.replace(dest)
+    except OSError:
+        return None
+    return dest if dest.is_file() else None
+
+
+def discard_active_recording() -> None:
+    try:
+        ACTIVE_REC.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def wav_duration_s(path: Path) -> float:
+    import wave
+
+    try:
+        with wave.open(str(path), "rb") as w:
+            rate = float(w.getframerate() or 0)
+            if rate <= 0:
+                return 0.0
+            return w.getnframes() / rate
+    except (OSError, wave.Error):
+        return 0.0

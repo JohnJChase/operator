@@ -14,7 +14,9 @@ NWS_KHB36 = "https://stream.mikev.com/khb36.mp3"
 LOCAL_MENU = (
     "Operator. Dial 1 for news, 2 for weather, "
     "3 for WAMU, 4 for weather radio, "
-    "8 for the information operator, 9 for outside line. "
+    "5 for voicemail, "
+    "7 to join a meeting, "
+    "8 for the information desk, 9 for outside line. "
     "Dial 0 to hear this again."
 )
 
@@ -22,7 +24,7 @@ LOCAL_MENU = (
 @dataclass(frozen=True)
 class ServiceResult:
     digit: int
-    kind: str  # speak | play_file | stream | outside_seize | realtime_operator | …
+    kind: str  # speak | play_file | stream | outside_seize | info_desk | …
     text: str
     path: Path | None = None
     url: str | None = None
@@ -36,7 +38,24 @@ WEATHER_CACHE = Path("data/weather.json")
 
 def handle_digit(digit: int) -> ServiceResult:
     if digit == 0:
-        return ServiceResult(digit=0, kind="speak", text=LOCAL_MENU)
+        text = LOCAL_MENU
+        try:
+            from operator_os.db import unheard_count, unheard_voicemail_count
+
+            n = unheard_count()
+            nv = unheard_voicemail_count()
+        except Exception:
+            n = 0
+            nv = 0
+        if n == 1:
+            text = f"{text} You have 1 unheard message."
+        elif n > 1:
+            text = f"{text} You have {n} unheard messages."
+        if nv == 1:
+            text = f"{text} You have 1 new voicemail."
+        elif nv > 1:
+            text = f"{text} You have {nv} new voicemails."
+        return ServiceResult(digit=0, kind="speak", text=text)
     if digit == 1:
         audio = _first_existing(NEWS_AUDIO_CANDIDATES)
         if audio is not None:
@@ -74,15 +93,19 @@ def handle_digit(digit: int) -> ServiceResult:
             text="National Weather Service radio",
             url=NWS_KHB36,
         )
+    if digit == 5:
+        return ServiceResult(digit=5, kind="mailbox", text="Voicemail.")
+    if digit == 7:
+        return ServiceResult(digit=7, kind="join_meeting", text="Join meeting.")
     if digit == 8:
-        return ServiceResult(digit=8, kind="realtime_operator", text="")
+        return ServiceResult(digit=8, kind="info_desk", text="")
     if digit == 9:
         return ServiceResult(
             digit=9,
             kind="outside_seize",
             text="Outside line.",
         )
-    if 5 <= digit <= 7:
+    if digit == 6:
         return ServiceResult(
             digit=digit,
             kind="speak",
