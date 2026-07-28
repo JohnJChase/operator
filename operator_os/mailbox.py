@@ -235,7 +235,7 @@ class InboxSession:
 
     def _run(self) -> None:
         from operator_os import db as store
-        from operator_os.sip import speak_phone_number
+        from operator_os.phonebook import speak_from
 
         items = store.list_waiting_chrono(limit=20)
         if not items:
@@ -255,11 +255,7 @@ class InboxSession:
             if self.cancel.is_set():
                 return
             self._go.clear()
-            who = (
-                speak_phone_number(item.from_e164)
-                if item.from_e164
-                else "an unknown caller"
-            )
+            who = speak_from(item.from_e164) if item.from_e164 else "an unknown caller"
             if item.kind == "sms":
                 self._phase = "play"
                 self.audio.speak(f"Message from {who}: {item.body}", wait=True)

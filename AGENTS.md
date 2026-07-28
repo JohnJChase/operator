@@ -105,6 +105,9 @@ first; flash vs hangup is decided after silence.
 
 Audio topology: `docs/audio-line.md`.
 
+Diagnostic console (LAN): `docs/console.md`. Chart/plant diagnostics plus inbox,
+directory, and editable streams; call control still goes through the chart.
+
 ### Adding a telephone capability (mandatory)
 
 1. **Chart first** — new `State` / `Event` / edges in `state.py` (and `CHART_EDGES`).

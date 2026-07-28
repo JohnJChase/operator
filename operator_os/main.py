@@ -42,8 +42,13 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("trace-hook", help="print hook transitions")
     sub.add_parser("trace-dial", help="print dial pulses and digits")
-    rt = sub.add_parser("ring-test", help="energize ring relay briefly")
-    rt.add_argument("--seconds", type=float, default=2.0)
+    rt = sub.add_parser("ring-test", help="energize ring relay (Ctrl+C to stop)")
+    rt.add_argument(
+        "--seconds",
+        type=float,
+        default=0.0,
+        help="max seconds (0 = until Ctrl+C; just: just ring-test 10)",
+    )
     at = sub.add_parser("audio-test", help="play a test tone")
     at.add_argument("--tone", type=float, default=440.0)
     at.add_argument("--seconds", type=float, default=2.0)
@@ -318,6 +323,18 @@ def run_loop(
     plant = Plant(audio=audio, bridge=handset_bridge, live=live_audio)
     plant.context.sip_mic_capture = int(audio_cfg.get("sip_mic_capture", 12))
 
+    from operator_os.console_hub import (
+        RING_TEST_MS,
+        ConsoleHub,
+        compute_readiness,
+        console_password,
+    )
+    from operator_os.console_http import ConsoleHttpServer
+
+    console_hub = ConsoleHub(events_tail=lambda: list(events.recent))
+    console_http: ConsoleHttpServer | None = None
+    service_digit: int | None = None
+
     def _status(msg: str) -> None:
         print(msg, flush=True)
 
@@ -396,10 +413,56 @@ def run_loop(
             _status(f"sip: inbound register failed {e}")
             events.emit("sip", value="inbound_error", detail=str(e)[:120])
 
+    def _publish_console() -> None:
+        from operator_os.google_calendar import calendar_configured, client_id
+
+        sip_wanted = sip_configured()
+        sip_reg = bool(inbound is not None and inbound.is_alive())
+        sip_call = bool(sip_session is not None and sip_session.is_alive())
+        parts: list[str] = []
+        if sip_wanted:
+            parts.append("reg" if sip_reg else "down")
+        else:
+            parts.append("n/a")
+        if sip_call:
+            parts.append("call")
+        cal_wanted = bool(client_id())
+        readiness = compute_readiness(
+            sip_wanted=sip_wanted,
+            sip_registered=sip_reg,
+            calendar_wanted=cal_wanted,
+            calendar_ok=calendar_configured(),
+        )
+        ring_thr = getattr(phone, "_ring_thread", None)
+        ringing = ctl.state in (State.INCOMING_RINGING, State.SMS_ALERTING) or (
+            ring_thr is not None and ring_thr.is_alive()
+        )
+        console_hub.set_outside_buffer(outside_digits)
+        console_hub.publish(
+            {
+                "state": ctl.state.value,
+                "off_hook": phone.is_off_hook(),
+                "ringing": ringing,
+                "service_digit": service_digit,
+                "sip": {
+                    "wanted": sip_wanted,
+                    "registered": sip_reg,
+                    "active_call": sip_call,
+                    "summary": " ".join(parts),
+                    "dest": (sip_dest or "")[:32],
+                },
+                "plant": plant.snapshot(),
+                "readiness": readiness,
+            }
+        )
+
     def apply(tr) -> None:
         nonlocal expect_service_done, op_session, sip_session, sip_dest, sip_dtmf, inbound
         nonlocal outside_digits, outside_last_at, ring_started_at, vm_until
         nonlocal sms_alert_id, sms_deadline, resume_media, meet_choices, meet_deadline
+        nonlocal service_digit
+        if tr.reason:
+            console_hub.note_transition(reason=tr.reason)
         for action in tr.actions:
             if action == "sip_hangup":
                 _hangup_sip(discard_rec=(tr.reason != "vm_done"))
@@ -541,6 +604,7 @@ def run_loop(
             resume_media = None
             meet_choices = []
             meet_deadline = None
+            service_digit = None
             plant.context.sip_line_mode = "bridge"
             if op_session is not None:
                 op_session.cancel_now()
@@ -732,14 +796,14 @@ def run_loop(
         nonlocal op_session, expect_service_done
         from operator_os import db as store
         from operator_os.mailbox import start_sms_reply
-        from operator_os.sip import speak_phone_number
+        from operator_os.phonebook import speak_from
 
         msg = store.get_message(message_id)
         if msg is None:
             expect_service_done = True
             return
         who = msg.from_e164 or "unknown"
-        spoken_from = speak_phone_number(who) if who != "unknown" else "unknown"
+        spoken_from = speak_from(who) if who != "unknown" else "unknown"
         audio.speak(f"Message from {spoken_from}: {msg.body}", wait=True)
         store.mark_heard(message_id)
         events.emit("sms", value="heard", digit=message_id)
@@ -844,10 +908,75 @@ def run_loop(
             _status(f"sms: webhook failed {e}")
     elif live_audio:
         _status("sms: not configured — inbound webhook off")
+    if console_password():
+        try:
+            console_http = ConsoleHttpServer(console_hub)
+            console_http.start()
+            _status(
+                f"console: http://{console_http.host}:{console_http.port}/ "
+                "(password required)"
+            )
+        except Exception as e:
+            console_http = None
+            _status(f"console: failed {e}")
+    else:
+        _status("console: off (set OPERATOR_CONSOLE_PASSWORD to enable)")
+    _publish_console()
     try:
         while True:
             if stop_at and time.monotonic() >= stop_at:
+                if console_http is not None:
+                    console_http.stop()
                 return 0
+
+            if console_hub.take_ring_test():
+                try:
+                    phone.ring_pattern([(RING_TEST_MS, 0)])
+                    events.emit("console", value="ring_test", ms=RING_TEST_MS)
+                    _status(f"console: ring test {RING_TEST_MS}ms")
+                except Exception as e:
+                    _status(f"console: ring test failed {e}")
+
+            place = console_hub.take_place_call()
+            if place:
+                if not phone.is_off_hook():
+                    _status(f"console: place_call ignored (on hook) {place}")
+                elif ctl.state not in (
+                    State.DIAL_TONE,
+                    State.COLLECTING_DIGIT,
+                    State.PLAYING_SERVICE,
+                    State.OUTSIDE_LINE,
+                    State.MEET_CHOOSING,
+                ):
+                    _status(f"console: place_call ignored (state={ctl.state.value})")
+                else:
+                    if op_session is not None:
+                        try:
+                            op_session.cancel_now()
+                        except Exception:
+                            pass
+                        op_session = None
+                    expect_service_done = False
+                    resume_media = None
+                    sip_dest = place
+                    sip_dtmf = ""
+                    events.emit("console", value="place_call", detail=place[:20])
+                    _status(f"console: place_call {place}")
+                    if ctl.state == State.MEET_CHOOSING:
+                        meet_choices = []
+                        meet_deadline = None
+                        apply(ctl.handle(Event("meet_cancel")))
+                    if ctl.state == State.PLAYING_SERVICE:
+                        apply(ctl.handle(Event("place_call")))
+                    else:
+                        if ctl.state != State.OUTSIDE_LINE:
+                            apply(ctl.handle(Event("digit", value=9)))
+                        if ctl.state == State.OUTSIDE_LINE:
+                            apply(ctl.handle(Event("place_call")))
+                    if sip_session is None and live_audio:
+                        apply(ctl.handle(Event("sip_done")))
+
+            _publish_console()
 
             for kind, value in _drain_fifo(q):
                 if kind == "hook":
@@ -1006,7 +1135,13 @@ def run_loop(
                     and pending == 0
                     and (time.monotonic() - outside_last_at) >= interdigit_s
                 ):
-                    e164 = normalize_nanp(outside_digits)
+                    e164 = None
+                    try:
+                        from operator_os.phonebook import resolve_outside_digits
+
+                        e164 = resolve_outside_digits(outside_digits)
+                    except Exception:
+                        e164 = normalize_nanp(outside_digits)
                     outside_digits = ""
                     outside_last_at = None
                     decoder.reset()
@@ -1060,6 +1195,7 @@ def run_loop(
 
             digit = decoder.poll(now_ms)
             if digit is not None:
+                console_hub.note_digit(digit)
                 pulses_n = 10 if digit == 0 else digit
                 events.emit("digit", value=digit, pulses=pulses_n)
                 _status(f"digit={digit}")
@@ -1110,6 +1246,7 @@ def run_loop(
                         outside_last_at = None
                     elif ctl.state == State.PLAYING_SERVICE:
                         result = handle_digit(digit)
+                        service_digit = digit
                         if result.kind == "join_meeting":
                             joined = _start_join_meeting()
                             if joined:
@@ -1142,6 +1279,8 @@ def run_loop(
         _hangup_sip()
         if sms_webhook is not None:
             sms_webhook.stop()
+        if console_http is not None:
+            console_http.stop()
         return 0
 
 

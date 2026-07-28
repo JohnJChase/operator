@@ -6,9 +6,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-# WAMU 88.5 HD-1 — live NPR from American University Radio.
+# Legacy constants — defaults; live map is data/streams.yaml via streams.load_streams.
 WAMU_PLS = "https://static.wamu.org/streams/live/1/mp3.1.pls"
-# NOAA Weather Radio KHB36 (Washington / Baltimore area) via mikev.com relay.
 NWS_KHB36 = "https://stream.mikev.com/khb36.mp3"
 
 LOCAL_MENU = (
@@ -74,19 +73,17 @@ def handle_digit(digit: int) -> ServiceResult:
             text="Weather Bureau report is not yet on file. Please try again later.",
         )
     if digit == 3:
-        return ServiceResult(
-            digit=3,
-            kind="stream",
-            text="WAMU 88.5",
-            url=WAMU_PLS,
-        )
+        from operator_os.streams import get_stream
+
+        got = get_stream(3)
+        label, url = got if got else ("WAMU 88.5", WAMU_PLS)
+        return ServiceResult(digit=3, kind="stream", text=label, url=url)
     if digit == 4:
-        return ServiceResult(
-            digit=4,
-            kind="stream",
-            text="National Weather Service radio",
-            url=NWS_KHB36,
-        )
+        from operator_os.streams import get_stream
+
+        got = get_stream(4)
+        label, url = got if got else ("National Weather Service radio", NWS_KHB36)
+        return ServiceResult(digit=4, kind="stream", text=label, url=url)
     if digit == 5:
         return ServiceResult(digit=5, kind="mailbox", text="Messages.")
     if digit == 7:

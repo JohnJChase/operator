@@ -1,6 +1,6 @@
 # Hardware profile verification (Rev A)
 
-Date: 2026-07-20
+Date: 2026-07-20 (ring pin updated 2026-07-27: GPIO22 → GPIO9 on HAT)
 
 Profile: `config/hardware_profile.yaml` (`rev_a_direct_bypass_gpio10`)
 
@@ -10,7 +10,7 @@ Profile: `config/hardware_profile.yaml` (`rev_a_direct_bypass_gpio10`)
 |---|---|---|
 | Hook | 17 | Manual: many clean ON/OFF transitions via `trace-hook` |
 | Dial pulse | 10 | Manual: digits `1-9` and `0` (10 pulses) via `trace-dial` |
-| Ring | 22 | `ring-test --seconds 1.5` energized and exited clean |
+| Ring | 9 | Perfboard HAT (was breadboard GPIO22). Re-verify with `just ring-test` |
 
 ## Audio
 

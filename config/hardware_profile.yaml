@@ -3,8 +3,9 @@ profile:
   verified_at: '2026-07-20'
   verified_by: phase0-smoke
   notes:
-  - Rev A profile as of 2026-07-20.
-  - 'Verified: hook transitions, digits 0-9, ring pulse, 440 Hz, mic record.'
+  - Rev A profile; migrating breadboard → perfboard HAT one subsystem at a time.
+  - '2026-07-27: ring drive moved breadboard GPIO22 → HAT GPIO9.'
+  - 'Verified (pre-HAT): hook transitions, digits 0-9, ring pulse, 440 Hz, mic record.'
   - Use trace/calibration only after rewire or if digit decode misbehaves.
   - See docs/hardware-profile-verified.md.
 raspberry_pi:
@@ -58,7 +59,7 @@ gpio:
     off_normal_available: false
     calibration_ui_desired: true
   ring:
-    bcm: 22
+    bcm: 9
     direction: output
     active: high
     initial: low

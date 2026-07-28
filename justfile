@@ -87,7 +87,9 @@ trace-hook:
 trace-dial:
     uv run operator-os trace-dial
 
-ring-test seconds="2":
+# just passes recipe args positionally: `just ring-test 10` → --seconds 10
+# Default 0 = ring until Ctrl+C (or off-hook).
+ring-test seconds="0":
     uv run operator-os ring-test --seconds {{seconds}}
 
 audio-test tone="440" seconds="2":

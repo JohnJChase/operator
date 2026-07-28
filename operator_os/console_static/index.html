@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Operator Exchange — Console</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <div id="login-gate" class="gate hidden">
+    <form id="login-form" class="ticket login-ticket">
+      <h1>Western Electric Exchange</h1>
+      <p class="tag">Diagnostic console — attendant access</p>
+      <label>Password
+        <input type="password" name="password" autocomplete="current-password" required />
+      </label>
+      <button type="submit">Enter</button>
+      <p id="login-err" class="err"></p>
+    </form>
+  </div>
+
+  <div id="app" class="hidden layout">
+    <header class="masthead ticket">
+      <div>
+        <h1>Central Office</h1>
+        <p class="tag">Chart · plant · inbox · directory</p>
+      </div>
+      <div class="mast-right">
+        <span id="readiness" class="chip">—</span>
+        <button type="button" id="btn-logout" class="linkish">Sign out</button>
+      </div>
+    </header>
+
+    <section class="io-strip ticket">
+      <div><span class="k">State</span> <span id="st-state" class="mono">—</span></div>
+      <div><span class="k">Hook</span> <span id="st-hook" class="mono">—</span></div>
+      <div><span class="k">Last digit</span> <span id="st-digit" class="mono">—</span></div>
+      <div><span class="k">Last 10</span> <span id="st-digits" class="mono">—</span></div>
+      <div><span class="k">Outside</span> <span id="st-outside" class="mono">—</span></div>
+      <div><span class="k">Ring</span> <span id="st-ring" class="mono">—</span></div>
+      <div><span class="k">SIP</span> <span id="st-sip" class="mono">—</span></div>
+      <div><span class="k">Event</span> <span id="st-event" class="mono">—</span></div>
+    </section>
+
+    <nav class="tabs ticket" role="tablist" aria-label="Console sections">
+      <button type="button" class="tab" data-tab="plant" role="tab">Plant</button>
+      <button type="button" class="tab" data-tab="messages" role="tab">
+        Messages <span id="tab-waiting" class="tab-badge hidden">0</span>
+      </button>
+      <button type="button" class="tab" data-tab="directory" role="tab">Directory</button>
+      <button type="button" class="tab" data-tab="streams" role="tab">Streams</button>
+    </nav>
+
+    <main class="panels">
+      <section id="panel-plant" class="panel" data-panel="plant" role="tabpanel">
+        <div class="grid">
+          <section class="ticket plant-panel">
+            <h2>Plant chart</h2>
+            <p class="fine">Current state highlighted. Outgoing edges in ink; others faded.</p>
+            <div id="chart" class="chart mono"></div>
+            <aside class="patch">
+              <h3>Patch</h3>
+              <pre id="patch-pre" class="mono">—</pre>
+            </aside>
+          </section>
+
+          <section class="ticket menu-panel">
+            <h2>Menu guide</h2>
+            <p class="fine">Digit tree — branch lit when it matches live state.</p>
+            <ul id="menu-tree" class="menu-tree"></ul>
+          </section>
+        </div>
+
+        <section class="ticket">
+          <div class="row-head">
+            <h2>Activity</h2>
+            <label class="fine">Filter
+              <input type="search" id="log-filter" placeholder="type, digit, sip…" />
+            </label>
+            <button type="button" id="btn-ring" class="btn">Ring test (1.5s)</button>
+          </div>
+          <pre id="log" class="log mono"></pre>
+        </section>
+      </section>
+
+      <section id="panel-messages" class="panel hidden" data-panel="messages" role="tabpanel">
+        <section class="ticket panel-fill">
+          <div class="row-head">
+            <h2>Message tickets</h2>
+            <button type="button" id="btn-inbox-refresh" class="btn">Refresh</button>
+          </div>
+          <p class="fine">SMS + voicemail. Reply/call require confirm; calls need handset off-hook.</p>
+          <div id="inbox" class="ticket-list scroll-pane"></div>
+        </section>
+      </section>
+
+      <section id="panel-directory" class="panel hidden" data-panel="directory" role="tabpanel">
+        <section class="ticket panel-fill">
+          <div class="row-head">
+            <h2>Directory</h2>
+          </div>
+          <p class="fine">Names on inbound announce; short codes after digit 9; Call uses chart place_call.</p>
+          <form id="pb-form" class="pb-form">
+            <input name="name" placeholder="Name" required />
+            <input name="e164" placeholder="E.164 / NANP" required />
+            <input name="short_code" placeholder="Short code" />
+            <input name="notes" placeholder="Notes" />
+            <button type="submit" class="btn">Add / update</button>
+          </form>
+          <div id="phonebook" class="ticket-list scroll-pane"></div>
+        </section>
+      </section>
+
+      <section id="panel-streams" class="panel hidden" data-panel="streams" role="tabpanel">
+        <section class="ticket">
+          <div class="row-head">
+            <h2>Entertainment streams</h2>
+            <button type="button" id="btn-streams-save" class="btn">Validate &amp; save</button>
+          </div>
+          <p class="fine">Digits 3 and 4 — probed over HTTP before write so the phone never stores a dead URL.</p>
+          <p id="streams-status" class="fine" aria-live="polite"></p>
+          <div id="streams-form" class="streams-form"></div>
+        </section>
+      </section>
+    </main>
+
+    <footer class="fine foot">
+      Phone remains authoritative. Console writes: login, ring test, inbox, directory, streams, confirmed place-call.
+    </footer>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

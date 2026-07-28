@@ -367,7 +367,7 @@ class LocalTools:
 
     def list_messages(self) -> str:
         from operator_os import db as store
-        from operator_os.sip import speak_phone_number
+        from operator_os.phonebook import speak_from
 
         rows = store.list_unheard(limit=10)
         if not rows:
@@ -377,7 +377,7 @@ class LocalTools:
         parts = []
         summary = []
         for m in rows:
-            who = speak_phone_number(m.from_e164) if m.from_e164 else "unknown"
+            who = speak_from(m.from_e164) if m.from_e164 else "unknown"
             parts.append(f"number {m.id} from {who}")
             summary.append({"id": m.id, "from": m.from_e164})
         spoken = "Unheard messages: " + "; ".join(parts) + "."
@@ -385,13 +385,13 @@ class LocalTools:
 
     def read_message(self, message_id: int = 0) -> str:
         from operator_os import db as store
-        from operator_os.sip import speak_phone_number
+        from operator_os.phonebook import speak_from
 
         msg = store.get_message(int(message_id))
         if msg is None or msg.direction != "in":
             return json.dumps({"ok": False, "error": "message not found"})
         store.mark_heard(msg.id)
-        who = speak_phone_number(msg.from_e164) if msg.from_e164 else "unknown"
+        who = speak_from(msg.from_e164) if msg.from_e164 else "unknown"
         spoken = f"Message from {who}: {msg.body}"
         return json.dumps(
             {
@@ -404,7 +404,7 @@ class LocalTools:
 
     def list_voicemails(self) -> str:
         from operator_os import db as store
-        from operator_os.sip import speak_phone_number
+        from operator_os.phonebook import speak_from
 
         rows = store.list_unheard_voicemails(limit=10)
         if not rows:
@@ -414,7 +414,7 @@ class LocalTools:
         parts = []
         summary = []
         for vm in rows:
-            who = speak_phone_number(vm.from_e164) if vm.from_e164 else "unknown"
+            who = speak_from(vm.from_e164) if vm.from_e164 else "unknown"
             parts.append(f"number {vm.id} from {who}")
             summary.append({"id": vm.id, "from": vm.from_e164})
         spoken = "New voicemail: " + "; ".join(parts) + "."
@@ -424,12 +424,12 @@ class LocalTools:
         from pathlib import Path
 
         from operator_os import db as store
-        from operator_os.sip import speak_phone_number
+        from operator_os.phonebook import speak_from
 
         vm = store.get_voicemail(int(voicemail_id))
         if vm is None:
             return json.dumps({"ok": False, "error": "voicemail not found"})
-        who = speak_phone_number(vm.from_e164) if vm.from_e164 else "unknown"
+        who = speak_from(vm.from_e164) if vm.from_e164 else "unknown"
         path = Path(vm.path)
         if not path.is_file() or path.stat().st_size < 44:
             store.mark_voicemail_heard(vm.id)
@@ -469,7 +469,7 @@ class LocalTools:
 
     def callback_voicemail(self, voicemail_id: int = 0) -> str:
         from operator_os import db as store
-        from operator_os.sip import speak_phone_number
+        from operator_os.phonebook import speak_from
 
         vm = store.get_voicemail(int(voicemail_id))
         if vm is None:
@@ -482,7 +482,7 @@ class LocalTools:
                     "announce": "That voicemail has no callback number.",
                 }
             )
-        who = speak_phone_number(vm.from_e164)
+        who = speak_from(vm.from_e164)
         spoken = (
             f"The number is {who}. Hang up and dial 9, then that number, to call back."
         )

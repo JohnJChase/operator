@@ -236,6 +236,31 @@ def get_message(message_id: int) -> Message | None:
     return _row_to_message(row) if row else None
 
 
+def list_messages(*, limit: int = 50) -> list[Message]:
+    """Recent SMS both directions (newest first) for the web inbox."""
+    init_db()
+    conn = _connection()
+    with _lock:
+        rows = conn.execute(
+            """
+            SELECT * FROM messages
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+    return [_row_to_message(r) for r in rows]
+
+
+def delete_message(message_id: int) -> bool:
+    init_db()
+    conn = _connection()
+    with _lock:
+        cur = conn.execute("DELETE FROM messages WHERE id = ?", (int(message_id),))
+        conn.commit()
+        return cur.rowcount > 0
+
+
 @dataclass(frozen=True)
 class Voicemail:
     id: int
@@ -318,6 +343,22 @@ def get_voicemail(voicemail_id: int) -> Voicemail | None:
             "SELECT * FROM voicemails WHERE id = ?", (int(voicemail_id),)
         ).fetchone()
     return _row_to_voicemail(row) if row else None
+
+
+def list_voicemails(*, limit: int = 50) -> list[Voicemail]:
+    """Recent voicemails (newest first) for the web inbox."""
+    init_db()
+    conn = _connection()
+    with _lock:
+        rows = conn.execute(
+            """
+            SELECT * FROM voicemails
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+    return [_row_to_voicemail(r) for r in rows]
 
 
 def mark_voicemail_heard(voicemail_id: int) -> Voicemail | None:

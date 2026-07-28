@@ -53,21 +53,28 @@ def trace_dial(profile: HardwareProfile, seconds: float = 60.0) -> int:
     return 0
 
 
-def ring_test(profile: HardwareProfile, seconds: float = 2.0) -> int:
+def ring_test(profile: HardwareProfile, seconds: float = 0.0) -> int:
+    """Energize ring relay. ``seconds`` <= 0 → until Ctrl+C (or off-hook)."""
     phone = GpioPhone(profile)
     if phone.is_off_hook():
         print("Refusing ring test: handset is off-hook")
         phone.close()
         return 1
-    print(f"Ringing GPIO{profile.gpio.ring_bcm} for up to {seconds:.1f}s (lift handset to cut off)")
+    pin = profile.gpio.ring_bcm
+    if seconds <= 0:
+        print(f"Ringing GPIO{pin} until Ctrl+C (lift handset to cut off)")
+    else:
+        print(f"Ringing GPIO{pin} for up to {seconds:.1f}s (lift handset to cut off)")
     phone.ring_start()
     try:
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
+        deadline = None if seconds <= 0 else time.monotonic() + seconds
+        while deadline is None or time.monotonic() < deadline:
             if phone.is_off_hook():
                 print("Off-hook detected; ring stopped")
                 break
             time.sleep(0.02)
+    except KeyboardInterrupt:
+        print("\nInterrupted", flush=True)
     finally:
         phone.ring_stop()
         phone.close()

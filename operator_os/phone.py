@@ -282,7 +282,7 @@ class SimulatorPhone(PhoneIO):
 
 @dataclass
 class GpioPhone(PhoneIO):
-    """Rev A GPIO: hook BCM17, dial BCM10 when_pressed, ring BCM22."""
+    """Rev A GPIO: hook BCM17, dial BCM10 when_pressed, ring BCM9 (HAT)."""
 
     profile: HardwareProfile
     decoder: DialDecoder = field(init=False)
