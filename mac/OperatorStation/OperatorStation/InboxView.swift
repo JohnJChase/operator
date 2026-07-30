@@ -105,8 +105,10 @@ final class InboxStore: ObservableObject {
 
 struct InboxView: View {
     @ObservedObject var settings: StationSettings
+    @ObservedObject private var model = AppModel.shared
     @StateObject private var store = InboxStore()
     @State private var replyTarget: InboxSMS?
+    @State private var highlightID: Int?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -131,79 +133,97 @@ struct InboxView: View {
                     .padding(.horizontal)
             }
 
-            List {
-                Section("Messages") {
-                    if store.sms.isEmpty {
-                        Text("No messages")
-                            .foregroundStyle(.secondary)
+            ScrollViewReader { proxy in
+                List {
+                    Section("Messages") {
+                        if store.sms.isEmpty {
+                            Text("No messages")
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(store.sms) { item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(item.displayPeer).fontWeight(.semibold)
+                                    Spacer()
+                                    Text(Self.formatTime(item.createdAt))
+                                        .foregroundStyle(.secondary)
+                                        .font(.caption)
+                                }
+                                Text(item.body)
+                                    .lineLimit(3)
+                                HStack {
+                                    if item.heardAt == nil && item.direction == "in" {
+                                        Button("Heard") { Task { await store.markHeardSMS(item) } }
+                                    }
+                                    Button("Reply") { replyTarget = item }
+                                    Button("Delete", role: .destructive) {
+                                        Task { await store.deleteSMS(item) }
+                                    }
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                            .padding(.vertical, 2)
+                            .padding(6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(item.id == highlightID ? Color.accentColor.opacity(0.15) : Color.clear)
+                            )
+                            .id(item.id)
+                        }
                     }
-                    ForEach(store.sms) { item in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(item.displayPeer).fontWeight(.semibold)
-                                Spacer()
-                                Text(Self.formatTime(item.createdAt))
+
+                    Section("Voicemail") {
+                        if store.voicemails.isEmpty {
+                            Text("No voicemail")
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(store.voicemails) { item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(item.displayFrom).fontWeight(.semibold)
+                                    Spacer()
+                                    Text(Self.formatTime(item.createdAt))
+                                        .foregroundStyle(.secondary)
+                                        .font(.caption)
+                                }
+                                Text(String(format: "%.0fs", item.durationS))
                                     .foregroundStyle(.secondary)
                                     .font(.caption)
-                            }
-                            Text(item.body)
-                                .lineLimit(3)
-                            HStack {
-                                if item.heardAt == nil && item.direction == "in" {
-                                    Button("Heard") { Task { await store.markHeardSMS(item) } }
+                                HStack {
+                                    if store.playingVMID == item.id {
+                                        Button("Stop") { store.stopPlayback() }
+                                    } else {
+                                        Button("Play") { Task { await store.playVM(item) } }
+                                    }
+                                    if item.heardAt == nil {
+                                        Button("Heard") { Task { await store.markHeardVM(item) } }
+                                    }
+                                    Button("Delete", role: .destructive) {
+                                        Task { await store.deleteVM(item) }
+                                    }
                                 }
-                                Button("Reply") { replyTarget = item }
-                                Button("Delete", role: .destructive) {
-                                    Task { await store.deleteSMS(item) }
-                                }
+                                .buttonStyle(.borderless)
                             }
-                            .buttonStyle(.borderless)
+                            .padding(.vertical, 2)
                         }
-                        .padding(.vertical, 2)
                     }
                 }
-
-                Section("Voicemail") {
-                    if store.voicemails.isEmpty {
-                        Text("No voicemail")
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(store.voicemails) { item in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(item.displayFrom).fontWeight(.semibold)
-                                Spacer()
-                                Text(Self.formatTime(item.createdAt))
-                                    .foregroundStyle(.secondary)
-                                    .font(.caption)
-                            }
-                            Text(String(format: "%.0fs", item.durationS))
-                                .foregroundStyle(.secondary)
-                                .font(.caption)
-                            HStack {
-                                if store.playingVMID == item.id {
-                                    Button("Stop") { store.stopPlayback() }
-                                } else {
-                                    Button("Play") { Task { await store.playVM(item) } }
-                                }
-                                if item.heardAt == nil {
-                                    Button("Heard") { Task { await store.markHeardVM(item) } }
-                                }
-                                Button("Delete", role: .destructive) {
-                                    Task { await store.deleteVM(item) }
-                                }
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                        .padding(.vertical, 2)
-                    }
+                .onChange(of: store.sms) { _, _ in
+                    scrollToFocus(proxy: proxy)
+                }
+                .onChange(of: model.focusSMSID) { _, _ in
+                    highlightID = model.focusSMSID
+                    scrollToFocus(proxy: proxy)
                 }
             }
         }
         .frame(minWidth: 480, minHeight: 420)
         .task {
             store.attach(settings: settings)
+            highlightID = model.focusSMSID
             await store.refresh()
+            // Refresh may complete before list lays out.
+            try? await Task.sleep(nanoseconds: 100_000_000)
         }
         .sheet(item: $replyTarget) { item in
             VStack(alignment: .leading, spacing: 12) {
@@ -225,6 +245,14 @@ struct InboxView: View {
             }
             .padding()
             .frame(width: 360)
+        }
+    }
+
+    private func scrollToFocus(proxy: ScrollViewProxy) {
+        guard let id = model.focusSMSID ?? highlightID else { return }
+        highlightID = id
+        withAnimation {
+            proxy.scrollTo(id, anchor: .center)
         }
     }
 

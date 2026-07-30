@@ -247,7 +247,12 @@ final class BridgeClient: ObservableObject {
         case "desktop.notify":
             let title = payload["title"] as? String ?? "Operator"
             let body = payload["body"] as? String ?? ""
-            try await DesktopCommands.notify(title: title, body: body)
+            let messageID: Int? = {
+                if let n = payload["message_id"] as? Int { return n }
+                if let n = payload["message_id"] as? NSNumber { return n.intValue }
+                return nil
+            }()
+            try await DesktopCommands.notify(title: title, body: body, messageID: messageID)
             return DesktopCommands.summary(title: title, body: body)
         default:
             throw CommandError.unsupported(kind)

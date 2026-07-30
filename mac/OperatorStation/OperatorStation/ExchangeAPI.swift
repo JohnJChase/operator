@@ -72,6 +72,18 @@ struct InboxPayload: Decodable {
     var waiting: Int
 }
 
+struct PlantStatusPayload: Decodable {
+    var state: String
+    var offHook: Bool
+    var ringing: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case offHook = "off_hook"
+        case ringing
+    }
+}
+
 private extension String {
     var nilIfEmpty: String? {
         let t = trimmingCharacters(in: .whitespacesAndNewlines)
@@ -114,6 +126,10 @@ struct ExchangeAPI {
 
     func fetchInbox() async throws -> InboxPayload {
         try await get("/api/inbox")
+    }
+
+    func fetchStatus() async throws -> PlantStatusPayload {
+        try await get("/api/status")
     }
 
     func markSMSHeard(_ id: Int) async throws {

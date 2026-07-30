@@ -9,26 +9,27 @@ struct OperatorStationApp: App {
     private let notificationDelegate = NotificationDelegate()
 
     init() {
-        UNUserNotificationCenter.current().delegate = notificationDelegate
+        let center = UNUserNotificationCenter.current()
+        center.delegate = notificationDelegate
     }
 
     var body: some Scene {
         MenuBarExtra {
             MenuBarContent(model: model)
+                .installWindowRouter()
         } label: {
-            Label(
-                model.bridge.state.isOnline ? "Operator Connected" : "Operator",
-                systemImage: model.bridge.state.isOnline ? "phone.fill" : "phone"
-            )
+            Label(model.plant.menuLine, systemImage: model.plant.symbolName)
         }
         .menuBarExtraStyle(.menu)
 
         Settings {
             SettingsView(settings: model.settings, bridge: model.bridge)
+                .installWindowRouter()
         }
 
         Window("Inbox", id: "inbox") {
             InboxView(settings: model.settings)
+                .installWindowRouter()
         }
         .defaultSize(width: 520, height: 560)
 
@@ -50,6 +51,10 @@ final class AppModel: ObservableObject {
 
     let settings: StationSettings
     let bridge: BridgeClient
+    let plantMonitor = PlantStatusMonitor()
+    @Published var focusSMSID: Int?
+    @Published private(set) var plant = PlantStatus()
+
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
@@ -63,11 +68,32 @@ final class AppModel: ObservableObject {
         bridge.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        plantMonitor.objectWillChange
+            .sink { [weak self] _ in
+                self?.plant = self?.plantMonitor.status ?? PlantStatus()
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
         Task {
             await DesktopCommands.requestNotificationPermission()
+            plantMonitor.start(settings: settings, bridge: bridge)
             if settings.isConfigured {
                 bridge.start(settings: settings)
             }
+        }
+    }
+
+    func openInbox(focusMessageID: Int?) {
+        focusSMSID = focusMessageID
+        NotificationCenter.default.post(
+            name: .operatorOpenInbox,
+            object: nil,
+            userInfo: focusMessageID.map { ["message_id": $0] }
+        )
+        if let open = WindowRouter.openInbox {
+            open()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 }
@@ -79,6 +105,28 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     ) async -> UNNotificationPresentationOptions {
         [.banner, .sound, .list]
     }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        let info = response.notification.request.content.userInfo
+        let messageID = Self.messageID(from: info)
+        let openInbox = info["open"] as? String == "inbox"
+            || response.notification.request.content.categoryIdentifier == DesktopCommands.smsCategory
+            || response.actionIdentifier == "OPEN_INBOX"
+            || response.actionIdentifier == UNNotificationDefaultActionIdentifier
+        guard openInbox || messageID != nil else { return }
+        await MainActor.run {
+            AppModel.shared.openInbox(focusMessageID: messageID)
+        }
+    }
+
+    private static func messageID(from info: [AnyHashable: Any]) -> Int? {
+        if let n = info["message_id"] as? Int { return n }
+        if let n = info["message_id"] as? NSNumber { return n.intValue }
+        return nil
+    }
 }
 
 private struct MenuBarContent: View {
@@ -86,6 +134,11 @@ private struct MenuBarContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        Text(model.plant.menuLine)
+            .foregroundStyle(.secondary)
+
+        Divider()
+
         SettingsLink {
             Text("Settings…")
         }
@@ -118,6 +171,7 @@ private struct MenuBarContent: View {
 
         Button("Quit Operator Station") {
             model.bridge.stop()
+            model.plantMonitor.stop()
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q", modifiers: .command)

@@ -4,6 +4,7 @@ import UserNotifications
 
 enum DesktopCommands {
     static let capabilities = ["open_url", "notify"]
+    static let smsCategory = "OPERATOR_SMS"
 
     static func validateOpenURL(_ raw: String) throws -> URL {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -26,17 +27,33 @@ enum DesktopCommands {
 
     static func requestNotificationPermission() async {
         let center = UNUserNotificationCenter.current()
+        let open = UNNotificationAction(
+            identifier: "OPEN_INBOX",
+            title: "Open Inbox",
+            options: [.foreground]
+        )
+        let category = UNNotificationCategory(
+            identifier: smsCategory,
+            actions: [open],
+            intentIdentifiers: [],
+            options: []
+        )
+        center.setNotificationCategories([category])
         _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
     }
 
-    static func notify(title: String, body: String) async throws {
+    static func notify(title: String, body: String, messageID: Int? = nil) async throws {
         let center = UNUserNotificationCenter.current()
         let content = UNMutableNotificationContent()
         content.title = String(title.prefix(80)).isEmpty ? "Operator" : String(title.prefix(80))
         content.body = String(body.prefix(240))
         content.sound = .default
+        if let messageID {
+            content.userInfo = ["message_id": messageID, "open": "inbox"]
+            content.categoryIdentifier = smsCategory
+        }
         let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
+            identifier: messageID.map { "sms-\($0)" } ?? UUID().uuidString,
             content: content,
             trigger: nil
         )

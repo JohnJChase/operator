@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct PlaceCallView: View {
@@ -49,11 +50,21 @@ struct PlaceCallView: View {
                         Task { await pickFromMacContacts() }
                     }
                 }
-                Button("Call this number") {
-                    Task { await callNumber(number) }
+                HStack {
+                    Button("Call this number") {
+                        Task { await callNumber(number) }
+                    }
+                    .disabled(number.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy)
+                    .keyboardShortcut(.defaultAction)
+                    Button("Cancel") {
+                        number = ""
+                        selectedID = nil
+                        message = nil
+                        error = nil
+                        NSApp.keyWindow?.close()
+                    }
+                    .keyboardShortcut(.cancelAction)
                 }
-                .disabled(number.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy)
-                .keyboardShortcut(.defaultAction)
             }
 
             Spacer()
