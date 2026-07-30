@@ -93,6 +93,15 @@ With `OPERATOR_MEET_JOIN_TARGET=desktop`:
 Existing multi-meeting behavior stays intact. If several meetings are possible,
 the phone reads the menu and the selected meeting opens on the Mac.
 
+## Incoming SMS
+
+When the Pi receives a new inbound SMS, the normal phone behavior still happens:
+the WE302 double-rings when idle, or queues the message if the phone is busy.
+
+If a Mac client is connected with the `notify` capability, the Pi also pushes a
+`desktop.notify` command with the sender and message preview. The Mac shows a
+native notification and acknowledges the command back to the Pi.
+
 ## Security rules
 
 - Use a long random `OPERATOR_DESKTOP_TOKEN`.
@@ -106,7 +115,6 @@ the phone reads the menu and the selected meeting opens on the Mac.
 Good next increments:
 
 - Mac inbox window backed by the Pi `/api/inbox` data.
-- Incoming SMS desktop notification.
 - Mac "call this contact" request that rings the WE302 first, then places the
   call after pickup.
 - Tiny SwiftUI menu bar wrapper around the same `operator-os mac-client` logic.

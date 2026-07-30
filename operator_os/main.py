@@ -356,6 +356,7 @@ def run_loop(
         desktop_token,
         meet_join_target,
         meet_video_url,
+        sms_notification_payload,
     )
 
     console_hub = ConsoleHub(events_tail=lambda: list(events.recent))
@@ -907,8 +908,30 @@ def run_loop(
         )
         expect_service_done = True
 
+    def _notify_desktop_sms(message_id: int) -> None:
+        from operator_os import db as store
+        from operator_os.phonebook import display_name
+
+        msg = store.get_message(message_id)
+        if msg is None:
+            return
+        cmd = console_hub.queue_desktop_command(
+            "desktop.notify",
+            sms_notification_payload(
+                message_id=msg.id,
+                from_e164=msg.from_e164,
+                from_name=display_name(msg.from_e164),
+                body=msg.body,
+            ),
+            target_id=desktop_client_target(),
+        )
+        if cmd is not None:
+            events.emit("desktop", value="sms_notify", digit=message_id)
+            _status(f"desktop: sms notify id={message_id}")
+
     def _queue_sms_alert(message_id: int) -> None:
         nonlocal sms_alert_id
+        _notify_desktop_sms(message_id)
         if ctl.state != State.ON_HOOK_IDLE or not live_audio:
             events.emit("sms", value="queued", digit=message_id)
             _status(f"sms: queued id={message_id}")

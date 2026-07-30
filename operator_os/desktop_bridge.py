@@ -47,6 +47,25 @@ def meet_video_url(meeting: Any) -> str:
     return f"https://meet.google.com/{cid}"
 
 
+def sms_notification_payload(
+    *,
+    message_id: int,
+    from_e164: str,
+    body: str,
+    from_name: str | None = None,
+) -> dict[str, Any]:
+    sender = (from_name or from_e164 or "Unknown").strip()
+    preview = " ".join((body or "").split())
+    if len(preview) > 220:
+        preview = preview[:217].rstrip() + "..."
+    return {
+        "title": f"Message from {sender}"[:80],
+        "body": preview,
+        "message_id": int(message_id),
+        "from_e164": from_e164,
+    }
+
+
 @dataclass(frozen=True)
 class DesktopClient:
     client_id: str

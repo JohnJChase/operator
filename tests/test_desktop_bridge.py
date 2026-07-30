@@ -11,7 +11,12 @@ import pytest
 
 from operator_os.console_hub import ConsoleHub
 from operator_os.console_http import ConsoleHttpServer
-from operator_os.desktop_bridge import DesktopRegistry, meet_video_url, validate_open_url
+from operator_os.desktop_bridge import (
+    DesktopRegistry,
+    meet_video_url,
+    sms_notification_payload,
+    validate_open_url,
+)
 from operator_os.google_calendar import MeetDialIn
 
 
@@ -56,6 +61,20 @@ def test_meet_video_url_from_dial_in():
         conference_id="abc-defg-hij",
     )
     assert meet_video_url(dial) == "https://meet.google.com/abc-defg-hij"
+
+
+def test_sms_notification_payload_prefers_contact_name_and_truncates():
+    payload = sms_notification_payload(
+        message_id=42,
+        from_e164="+15551234567",
+        from_name="Alice",
+        body="hello " * 80,
+    )
+    assert payload["title"] == "Message from Alice"
+    assert payload["message_id"] == 42
+    assert payload["from_e164"] == "+15551234567"
+    assert len(payload["body"]) <= 220
+    assert payload["body"].endswith("...")
 
 
 def test_http_desktop_register_requires_bearer(monkeypatch: pytest.MonkeyPatch):
