@@ -21,6 +21,20 @@ struct SettingsView: View {
                 TextField("Display name", text: $settings.displayName)
                     .textFieldStyle(.roundedBorder)
             }
+            Section {
+                Toggle("Open Meet on this Mac", isOn: $settings.receiveMeetings)
+                    .onChange(of: settings.receiveMeetings) { _, _ in
+                        bridge.applySettings(settings)
+                    }
+            } header: {
+                Text("Station")
+            } footer: {
+                Text(
+                    settings.receiveMeetings
+                        ? "Digit 7 can open Meet here (caps include open_url)."
+                        : "Meet opens elsewhere. On the Pi use OPERATOR_MEET_JOIN_TARGET=auto so digit 7 falls back to the handset SIP path."
+                )
+            }
             Section("Connection") {
                 LabeledContent("Status", value: bridge.state.label)
                 HStack {

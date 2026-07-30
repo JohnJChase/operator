@@ -162,6 +162,17 @@ private struct MenuBarContent: View {
 
         Text(model.bridge.state.label)
 
+        Toggle(
+            "Open Meet here",
+            isOn: Binding(
+                get: { model.settings.receiveMeetings },
+                set: { newValue in
+                    model.settings.receiveMeetings = newValue
+                    model.bridge.applySettings(model.settings)
+                }
+            )
+        )
+
         if !model.bridge.lastEvent.isEmpty {
             Text(model.bridge.lastEvent)
                 .lineLimit(2)

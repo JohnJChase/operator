@@ -73,8 +73,9 @@ phone bridge:
 OPERATOR_MEET_JOIN_TARGET=desktop
 ```
 
-Use `auto` to prefer the Mac when it is connected and fall back to the handset
-PSTN path when SIP is configured:
+Use `auto` to prefer the Mac when it is connected **and advertising
+`open_url`** (Mac Settings → “Open Meet on this Mac”), and fall back to the
+handset PSTN path when SIP is configured:
 
 ```bash
 OPERATOR_MEET_JOIN_TARGET=auto

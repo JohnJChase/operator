@@ -57,11 +57,24 @@ final class BridgeClient: ObservableObject {
         let token = settings.token.trimmingCharacters(in: .whitespacesAndNewlines)
         let clientID = settings.clientID.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = settings.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let capabilities = settings.capabilities
         state = .connecting
         appendLog("starting \(clientID) → \(base)")
         runTask = Task { [weak self] in
-            await self?.runLoop(base: base, token: token, clientID: clientID, name: name)
+            await self?.runLoop(
+                base: base,
+                token: token,
+                clientID: clientID,
+                name: name,
+                capabilities: capabilities
+            )
         }
+    }
+
+    /// Re-register with current capabilities (e.g. Meet toggle changed).
+    func applySettings(_ settings: StationSettings) {
+        guard settings.isConfigured else { return }
+        start(settings: settings)
     }
 
     func stop() {
@@ -97,12 +110,29 @@ final class BridgeClient: ObservableObject {
         }
     }
 
-    private func runLoop(base: String, token: String, clientID: String, name: String) async {
+    private func runLoop(
+        base: String,
+        token: String,
+        clientID: String,
+        name: String,
+        capabilities: [String]
+    ) async {
         while !Task.isCancelled {
             do {
                 state = .connecting
-                try await register(base: base, token: token, clientID: clientID, name: name)
-                try await eventLoop(base: base, token: token, clientID: clientID)
+                try await register(
+                    base: base,
+                    token: token,
+                    clientID: clientID,
+                    name: name,
+                    capabilities: capabilities
+                )
+                try await eventLoop(
+                    base: base,
+                    token: token,
+                    clientID: clientID,
+                    acceptOpenURL: capabilities.contains("open_url")
+                )
             } catch is CancellationError {
                 break
             } catch {
@@ -114,7 +144,13 @@ final class BridgeClient: ObservableObject {
         }
     }
 
-    private func register(base: String, token: String, clientID: String, name: String) async throws {
+    private func register(
+        base: String,
+        token: String,
+        clientID: String,
+        name: String,
+        capabilities: [String]
+    ) async throws {
         let url = try apiURL(base: base, path: "/api/desktop/register")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -123,14 +159,19 @@ final class BridgeClient: ObservableObject {
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "client_id": clientID,
             "name": name,
-            "capabilities": DesktopCommands.capabilities,
+            "capabilities": capabilities,
         ])
         let (data, response) = try await shortSession.data(for: request)
         try throwIfNeeded(response: response, data: data)
-        appendLog("registered \(clientID) caps=\(DesktopCommands.capabilities.joined(separator: ","))")
+        appendLog("registered \(clientID) caps=\(capabilities.joined(separator: ","))")
     }
 
-    private func eventLoop(base: String, token: String, clientID: String) async throws {
+    private func eventLoop(
+        base: String,
+        token: String,
+        clientID: String,
+        acceptOpenURL: Bool
+    ) async throws {
         var components = URLComponents(string: base + "/api/desktop/events")!
         components.queryItems = [URLQueryItem(name: "client_id", value: clientID)]
         guard let url = components.url else { throw BridgeError.badURL }
@@ -168,7 +209,8 @@ final class BridgeClient: ObservableObject {
                     token: token,
                     clientID: clientID,
                     event: parsed.event,
-                    dataLines: parsed.data.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+                    dataLines: parsed.data.split(separator: "\n", omittingEmptySubsequences: false).map(String.init),
+                    acceptOpenURL: acceptOpenURL
                 )
             }
         }
@@ -180,7 +222,8 @@ final class BridgeClient: ObservableObject {
         token: String,
         clientID: String,
         event: String,
-        dataLines: [String]
+        dataLines: [String],
+        acceptOpenURL: Bool
     ) async {
         guard !dataLines.isEmpty else { return }
         let eventName = event.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -213,7 +256,7 @@ final class BridgeClient: ObservableObject {
         var status = "ok"
         var message = ""
         do {
-            message = try await execute(payload)
+            message = try await execute(payload, acceptOpenURL: acceptOpenURL)
             lastEvent = message
             appendLog(message)
         } catch {
@@ -235,11 +278,14 @@ final class BridgeClient: ObservableObject {
         }
     }
 
-    private func execute(_ command: [String: Any]) async throws -> String {
+    private func execute(_ command: [String: Any], acceptOpenURL: Bool) async throws -> String {
         let kind = command["type"] as? String ?? ""
         let payload = command["payload"] as? [String: Any] ?? [:]
         switch kind {
         case "desktop.open_url":
+            guard acceptOpenURL else {
+                return "ignored open_url (Meet off on this Mac)"
+            }
             let raw = payload["url"] as? String ?? ""
             let url = try DesktopCommands.validateOpenURL(raw)
             DesktopCommands.openURL(url)

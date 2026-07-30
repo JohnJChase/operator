@@ -25,6 +25,17 @@ final class StationSettings: ObservableObject {
         didSet { Self.defaults.set(token, forKey: "desktopToken") }
     }
 
+    /// When true, register ``open_url`` so digit 7 / Meet can open here.
+    /// When false, only ``notify`` — Pi should use ``OPERATOR_MEET_JOIN_TARGET=auto``
+    /// to fall back to the handset SIP path.
+    @Published var receiveMeetings: Bool {
+        didSet { Self.defaults.set(receiveMeetings, forKey: "receiveMeetings") }
+    }
+
+    var capabilities: [String] {
+        receiveMeetings ? ["open_url", "notify"] : ["notify"]
+    }
+
     var isConfigured: Bool {
         !normalizedBaseURL.isEmpty && !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -40,5 +51,10 @@ final class StationSettings: ObservableObject {
         clientID = Self.defaults.string(forKey: "clientID") ?? "john-macbook"
         displayName = Self.defaults.string(forKey: "displayName") ?? "\(host) Mac"
         token = Self.defaults.string(forKey: "desktopToken") ?? ""
+        if Self.defaults.object(forKey: "receiveMeetings") == nil {
+            receiveMeetings = true
+        } else {
+            receiveMeetings = Self.defaults.bool(forKey: "receiveMeetings")
+        }
     }
 }
