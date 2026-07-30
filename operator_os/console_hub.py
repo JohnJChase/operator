@@ -103,11 +103,13 @@ class ConsoleHub:
     ) -> dict[str, Any]:
         return self.desktop.register_client(client_id, name, capabilities)
 
-    def connect_desktop_client(self, client_id: str) -> dict[str, Any]:
+    def connect_desktop_client(self, client_id: str) -> tuple[dict[str, Any], int]:
         return self.desktop.connect_client(client_id)
 
-    def disconnect_desktop_client(self, client_id: str) -> None:
-        self.desktop.disconnect_client(client_id)
+    def disconnect_desktop_client(
+        self, client_id: str, generation: int | None = None
+    ) -> None:
+        self.desktop.disconnect_client(client_id, generation=generation)
 
     def next_desktop_command(
         self, client_id: str, *, timeout_s: float = 15.0

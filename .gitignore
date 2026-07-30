@@ -57,4 +57,18 @@ PROJECT_OVERVIEW.md
 .vscode/
 *.swp
 
+# Xcode (Mac Operator Station)
+mac/**/xcuserdata/
+mac/**/*.xcuserstate
+mac/**/DerivedData/
+mac/**/*.moved-aside
+mac/**/*.pbxuser
+!mac/**/default.pbxuser
+mac/**/*.mode1v3
+!mac/**/default.mode1v3
+mac/**/*.mode2v3
+!mac/**/default.mode2v3
+mac/**/*.perspectivev3
+!mac/**/default.perspectivev3
+
 # Full-length FX sources kept locally under data/fx/src/ (gitignored).

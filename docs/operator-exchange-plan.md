@@ -453,6 +453,12 @@ Acceptance:
 
 Goal: replace terminal companion behavior with a small real Mac station.
 
+Status:
+
+- in progress in `mac/OperatorStation`
+- menu bar app registers + SSE reconnects; native notifications and open URL work
+- inbox window / call / meeting actions still TODO
+
 Recommended stack:
 
 - SwiftUI menu bar app
@@ -518,8 +524,9 @@ Acceptance:
 
 ## Immediate Next Build
 
-Phases 1–2 / 4–5 are live. Phase 3 request vocabulary stays optional. Next large
-piece is Phase 6 (native Mac app) when the CLI proves too thin.
+Phases 1–2 / 4–5 are live. Phase 3 request vocabulary stays optional. Phase 6
+menu-bar station is scaffolded (`mac/OperatorStation`); next is inbox UI and
+station actions when the menu-bar bridge proves out on a live Pi.
 
 ## Non-Goals For Now
 

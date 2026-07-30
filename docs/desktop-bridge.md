@@ -91,6 +91,26 @@ fan out to every online `notify` client.
 
 ## Mac setup
 
+### Native app (Phase 6)
+
+Open the Xcode project and run it:
+
+```bash
+open mac/OperatorStation/OperatorStation.xcodeproj
+```
+
+In Xcode: select the **OperatorStation** scheme → **My Mac** → ⌘R.
+
+Menu bar phone icon → **Settings…** (or ⌘,). Enter the same Pi URL, desktop
+token, and client id you use for the CLI. Connect. The app requests Notification
+Center permission on first launch and registers with caps `open_url,notify` over
+the existing `/api/desktop/*` SSE + POST protocol.
+
+Quit and reopen should reconnect without restarting the Pi. The Python CLI below
+remains a debug fallback.
+
+### Python CLI (reference / fallback)
+
 Clone the same repo on the Mac, install the Python environment, and run the
 client:
 
@@ -241,4 +261,6 @@ Resolve audio as `{OPERATOR_PI_URL}{audio_url}`. Do not Funnel these routes.
 
 Good next increments:
 
-- Phase 6: tiny SwiftUI menu bar wrapper around the same exchange protocol.
+- Inbox window + voicemail player in OperatorStation
+- “Call this contact” / “Open next meeting here” actions
+- Phase 7: iPhone station (PWA first)

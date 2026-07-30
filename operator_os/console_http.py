@@ -231,7 +231,7 @@ class ConsoleHttpServer:
 
             def _serve_desktop_events(self, client_id: str) -> None:
                 try:
-                    client = hub.connect_desktop_client(client_id)
+                    client, conn_gen = hub.connect_desktop_client(client_id)
                 except ValueError as e:
                     self._err(400, str(e))
                     return
@@ -250,7 +250,7 @@ class ConsoleHttpServer:
                         else:
                             self._send_sse("command", cmd)
                 except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
-                    hub.disconnect_desktop_client(client_id)
+                    hub.disconnect_desktop_client(client_id, generation=conn_gen)
 
             def _serve_vm_audio(self, vm_id: int) -> None:
                 path = inbox_api.resolve_vm_audio_path(vm_id)

@@ -113,6 +113,26 @@ def test_desktop_bridge_client_summary():
     assert bridge.client_summary() == "macbook:online:open_url,notify"
 
 
+def test_stale_sse_disconnect_does_not_offline_newer_stream():
+    """Mac relaunch: old SSE finally-disconnect must not kill the new stream."""
+    reg = DesktopRegistry()
+    client = reg.register("macbook", "MacBook", ["open_url", "notify"])
+    cid = client["client_id"]
+    _info1, gen1 = reg.connect(cid)
+    _info2, gen2 = reg.connect(cid)
+    assert gen2 != gen1
+    assert reg.has_online_client(capability="notify")
+
+    reg.disconnect(cid, generation=gen1)
+    assert reg.has_online_client(capability="notify")
+
+    delivery = DesktopBridge(registry=reg).notify(title="Operator", body="hi")
+    assert delivery.ok
+
+    reg.disconnect(cid, generation=gen2)
+    assert not reg.has_online_client(capability="notify")
+
+
 def test_notify_fans_out_ignoring_preferred_client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("OPERATOR_DESKTOP_CLIENT_ID", "mac-a")
     bridge = DesktopBridge()

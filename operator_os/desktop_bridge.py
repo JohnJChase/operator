@@ -120,6 +120,7 @@ class DesktopClient:
 class DesktopRegistry:
     _clients: dict[str, DesktopClient] = field(default_factory=dict, init=False)
     _queues: dict[str, queue.Queue[dict[str, Any]]] = field(default_factory=dict, init=False)
+    _conn_gen: dict[str, int] = field(default_factory=dict, init=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
 
     def register(self, client_id: str, name: str, capabilities: list[str]) -> dict[str, Any]:
@@ -141,11 +142,18 @@ class DesktopRegistry:
             self._queues.setdefault(cid, queue.Queue(maxsize=100))
             return self._clients[cid].public_dict(now=now)
 
-    def connect(self, client_id: str) -> dict[str, Any]:
+    def connect(self, client_id: str) -> tuple[dict[str, Any], int]:
+        """Mark online and return (public client dict, connection generation).
+
+        Generation lets a superseded SSE stream disconnect without marking the
+        newer stream offline (Mac app relaunch race).
+        """
         cid = _clean_id(client_id)
         with self._lock:
             client = self._require_client(cid)
             now = time.monotonic()
+            gen = self._conn_gen.get(cid, 0) + 1
+            self._conn_gen[cid] = gen
             self._clients[cid] = DesktopClient(
                 client_id=client.client_id,
                 name=client.name,
@@ -154,13 +162,15 @@ class DesktopRegistry:
                 connected=True,
                 last_ack=client.last_ack,
             )
-            return self._clients[cid].public_dict(now=now)
+            return self._clients[cid].public_dict(now=now), gen
 
-    def disconnect(self, client_id: str) -> None:
+    def disconnect(self, client_id: str, generation: int | None = None) -> None:
         cid = _clean_id(client_id)
         with self._lock:
             client = self._clients.get(cid)
             if client is None:
+                return
+            if generation is not None and self._conn_gen.get(cid) != generation:
                 return
             self._clients[cid] = DesktopClient(
                 client_id=client.client_id,
@@ -354,11 +364,11 @@ class DesktopBridge:
     ) -> dict[str, Any]:
         return self.registry.register(client_id, name, capabilities)
 
-    def connect_client(self, client_id: str) -> dict[str, Any]:
+    def connect_client(self, client_id: str) -> tuple[dict[str, Any], int]:
         return self.registry.connect(client_id)
 
-    def disconnect_client(self, client_id: str) -> None:
-        self.registry.disconnect(client_id)
+    def disconnect_client(self, client_id: str, generation: int | None = None) -> None:
+        self.registry.disconnect(client_id, generation=generation)
 
     def next_command(
         self, client_id: str, *, timeout_s: float = 15.0
