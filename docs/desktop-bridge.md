@@ -106,8 +106,12 @@ token, and client id you use for the CLI. Connect. The app requests Notification
 Center permission on first launch and registers with caps `open_url,notify` over
 the existing `/api/desktop/*` SSE + POST protocol.
 
-Quit and reopen should reconnect without restarting the Pi. The Python CLI below
-remains a debug fallback.
+Quit and reopen should reconnect without restarting the Pi. Menu bar items open
+**Inbox**, **Directory**, and **Place call** windows (desktop token). Directory can
+import one-shot from Mac Contacts into the exchange phonebook; Place call can dial
+an exchange contact or a number picked from Mac Contacts (no Contacts sync).
+
+The Python CLI below remains a debug fallback.
 
 ### Python CLI (reference / fallback)
 

@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import SwiftUI
 import UserNotifications
@@ -25,10 +26,24 @@ struct OperatorStationApp: App {
         Settings {
             SettingsView(settings: model.settings, bridge: model.bridge)
         }
+
+        Window("Inbox", id: "inbox") {
+            InboxView(settings: model.settings)
+        }
+        .defaultSize(width: 520, height: 560)
+
+        Window("Directory", id: "directory") {
+            DirectoryView(settings: model.settings)
+        }
+        .defaultSize(width: 520, height: 560)
+
+        Window("Place Call", id: "place-call") {
+            PlaceCallView(settings: model.settings)
+        }
+        .defaultSize(width: 440, height: 360)
     }
 }
 
-/// Single shared model so MenuBarExtra and Settings cannot diverge.
 @MainActor
 final class AppModel: ObservableObject {
     static let shared = AppModel()
@@ -68,12 +83,19 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
 
 private struct MenuBarContent: View {
     @ObservedObject var model: AppModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         SettingsLink {
             Text("Settings…")
         }
         .keyboardShortcut(",", modifiers: .command)
+
+        Divider()
+
+        Button("Inbox") { openWindow(id: "inbox") }
+        Button("Directory") { openWindow(id: "directory") }
+        Button("Place call…") { openWindow(id: "place-call") }
 
         Divider()
 

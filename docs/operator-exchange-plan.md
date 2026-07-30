@@ -455,9 +455,9 @@ Goal: replace terminal companion behavior with a small real Mac station.
 
 Status:
 
-- in progress in `mac/OperatorStation`
-- menu bar app registers + SSE reconnects; native notifications and open URL work
-- inbox window / call / meeting actions still TODO
+- menu bar station in `mac/OperatorStation` (SSE, native notify, open URL)
+- inbox, voicemail play, directory, Mac Contacts import/pick-to-dial
+- “open next meeting here” deferred (digit 7 already pushes Meet)
 
 Recommended stack:
 

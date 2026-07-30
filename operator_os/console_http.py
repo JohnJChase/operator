@@ -210,7 +210,7 @@ class ConsoleHttpServer:
                     self._serve_vm_audio(int(mid))
                     return
                 if path == "/api/phonebook":
-                    if not self._require_auth():
+                    if not self._require_inbox_auth():
                         return
                     from operator_os.phonebook import contact_to_dict, list_contacts
 
@@ -387,6 +387,33 @@ class ConsoleHttpServer:
                         return
                     self._ok_json({"ok": True, "e164": dest})
                     return
+                if path == "/api/phonebook":
+                    if not self._require_inbox_auth():
+                        return
+                    data = self._read_json()
+                    from operator_os.phonebook import contact_to_dict, upsert_contact
+
+                    try:
+                        c = upsert_contact(
+                            name=str(data.get("name") or ""),
+                            e164=str(data.get("e164") or ""),
+                            short_code=str(data.get("short_code") or ""),
+                            notes=str(data.get("notes") or ""),
+                            contact_id=int(data["id"]) if data.get("id") is not None else None,
+                        )
+                    except ValueError as e:
+                        self._err(400, str(e))
+                        return
+                    self._ok_json({"ok": True, "contact": contact_to_dict(c)})
+                    return
+                if path == "/api/phonebook/delete":
+                    if not self._require_inbox_auth():
+                        return
+                    data = self._read_json()
+                    from operator_os.phonebook import delete_contact
+
+                    self._ok_json({"ok": delete_contact(int(data.get("id") or 0))})
+                    return
                 if not self._require_auth():
                     return
                 if path == "/api/ring-test":
@@ -409,29 +436,6 @@ class ConsoleHttpServer:
                         self._err(code, delivery.reason or "no desktop client online")
                         return
                     self._ok_json({"ok": True, "command": delivery.command})
-                    return
-                if path == "/api/phonebook":
-                    data = self._read_json()
-                    from operator_os.phonebook import contact_to_dict, upsert_contact
-
-                    try:
-                        c = upsert_contact(
-                            name=str(data.get("name") or ""),
-                            e164=str(data.get("e164") or ""),
-                            short_code=str(data.get("short_code") or ""),
-                            notes=str(data.get("notes") or ""),
-                            contact_id=int(data["id"]) if data.get("id") is not None else None,
-                        )
-                    except ValueError as e:
-                        self._err(400, str(e))
-                        return
-                    self._ok_json({"ok": True, "contact": contact_to_dict(c)})
-                    return
-                if path == "/api/phonebook/delete":
-                    data = self._read_json()
-                    from operator_os.phonebook import delete_contact
-
-                    self._ok_json({"ok": delete_contact(int(data.get("id") or 0))})
                     return
                 if path == "/api/streams":
                     data = self._read_json()
