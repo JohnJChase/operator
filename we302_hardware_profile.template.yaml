@@ -3,7 +3,7 @@
 # Phase 0 verification. Do not hardcode these values in application code.
 
 profile:
-  name: rev_a_direct_bypass_gpio10
+  name: rev_a_direct_bypass_gpio22
   verified_at: null
   verified_by: null
   notes:
@@ -53,7 +53,7 @@ gpio:
     debounce_ms: 50
 
   dial_pulse:
-    bcm: 10
+    bcm: 22
     direction: input
     pull: up
     # Contact is open at rest and closes to GND during each pulse on dial return.
@@ -67,7 +67,7 @@ gpio:
     calibration_ui_desired: true
 
   ring:
-    bcm: 22
+    bcm: 6
     direction: output
     active: high
     initial: low

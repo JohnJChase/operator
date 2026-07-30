@@ -3,8 +3,8 @@ flowchart LR
         PI5["5V header pin 2/4"]
         PIGND["GND header pin"]
         GPIO17["GPIO17 pin 11 hook input"]
-        GPIO10["GPIO10 pin 19 pulse input"]
-        GPIO23["GPIO23 pin 16 ring output"]
+        GPIO22["GPIO22 pin 15 pulse input"]
+        GPIO6["GPIO6 pin 31 ring output"]
         HPTIP["ATR2x headphone tip"]
         HPSLEEVE["ATR2x headphone sleeve"]
         MICTIP["ATR2x mic tip"]
@@ -15,6 +15,7 @@ flowchart LR
         RHOOK["1k hook series resistor"]
         RPULSE["1k pulse series resistor"]
         RBASE["1k Q1 base resistor"]
+        RPD["5.1k Q1 base pulldown"]
         Q1["Q1 NPN relay driver"]
         RELAYCOIL["Axicom relay coil"]
         D1["flyback diode"]
@@ -55,8 +56,9 @@ flowchart LR
     PIGND --> BMLVGND
 
     GPIO17 --> RHOOK --> BK
-    GPIO10 --> RPULSE --> BB
-    GPIO23 --> RBASE --> Q1 --> RELAYCOIL
+    GPIO22 --> RPULSE --> BB
+    GPIO6 --> RBASE --> Q1 --> RELAYCOIL
+    Q1 --> RPD --> PIGND
     D1 --- RELAYCOIL
 
     PI5 --> RELAYNO --> BMLVPLUS

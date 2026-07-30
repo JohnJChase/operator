@@ -7,7 +7,13 @@ Local telephone exchange for a Western Electric 302 on a Raspberry Pi.
 1. Read `AGENTS.md` and adopt it before editing.
 2. Read `western-electric-302-ai-telephone-implementation-plan.md`.
 3. Read `REV_A_BOARD_AS_BUILT.md` when touching hardware.
-4. Use `config/hardware_profile.yaml` (from the Rev A template).
+4. Read `HAT_PERFBOARD_MIGRATION_PLAN.md` before moving the bench board to the
+   permanent HAT/perfboard.
+5. Read `PERFBOARD_RINGER_BUILD_GUIDE.md` before soldering the permanent ringer
+   section.
+6. Read `PERFBOARD_AUDIO_BUILD_GUIDE.md` before soldering receiver, mic, and
+   sidetone.
+7. Use `config/hardware_profile.yaml` (from the Rev A template).
 
 ## Setup (on the Pi)
 

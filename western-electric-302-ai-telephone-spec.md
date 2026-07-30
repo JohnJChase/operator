@@ -3,7 +3,7 @@
 > 2026-07-20 implementation note: the refined phased engineering plan is
 > captured in `western-electric-302-ai-telephone-implementation-plan.md`.
 > Current Rev A hardware uses GPIO17 for hook,
-> GPIO10 for dial pulse closures to ground, GPIO23 for ring relay enable,
+> GPIO22 for dial pulse closures to ground, GPIO6 for ring relay enable,
 > direct bypass audio, passive hardware sidetone, and optional software
 > sidetone owned by the audio router.
 

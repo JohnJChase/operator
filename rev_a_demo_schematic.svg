@@ -89,11 +89,11 @@
   <circle cx="410" cy="447" r="7" class="logic-node"/>
 
   <rect x="126" y="476" width="304" height="36" rx="10" class="term"/>
-  <text x="146" y="500" class="terminal-label">GPIO10 pulse</text>
+  <text x="146" y="500" class="terminal-label">GPIO22 pulse</text>
   <circle cx="410" cy="494" r="7" class="logic-node"/>
 
   <rect x="126" y="523" width="304" height="36" rx="10" class="term"/>
-  <text x="146" y="547" class="terminal-label">GPIO23 ring</text>
+  <text x="146" y="547" class="terminal-label">GPIO6 ring</text>
   <circle cx="410" cy="541" r="7" class="logic-node"/>
 
   <rect x="102" y="615" width="352" height="242" rx="16" class="chip"/>
@@ -275,6 +275,6 @@
   <circle cx="558" cy="1024" r="7" class="ring-node"/><text x="577" y="1030" class="legend-text">ring HV</text>
   <circle cx="704" cy="1024" r="7" class="audio-node"/><text x="723" y="1030" class="legend-text">audio</text>
   <circle cx="820" cy="1024" r="7" class="side-node"/><text x="839" y="1030" class="legend-text">sidetone</text>
-  <text x="1260" y="1030" class="legend-text">Ring cutoff is software: off-hook immediately drops GPIO23.</text>
+  <text x="1260" y="1030" class="legend-text">Ring cutoff is software: off-hook immediately drops GPIO6.</text>
 
 </svg>

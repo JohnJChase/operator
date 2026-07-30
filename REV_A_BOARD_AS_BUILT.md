@@ -28,7 +28,7 @@ The old induction-coil/condenser network is bypassed for the Rev A interface sig
 | Ring | Black Magic ring generator output directly across `L1` and `K` |
 | Ring command | Pi GPIO drives NPN relay driver; relay switches Black Magic low-voltage input |
 | Hook | `BK-Y` direct GPIO input; on-hook HIGH, off-hook LOW |
-| Dial pulse | `BB-Y` direct GPIO input on GPIO10; contact closes to GND during dial return pulses |
+| Dial pulse | `BB-Y` direct GPIO input on GPIO22; contact closes to GND during dial return pulses |
 | Receiver | ATR2x headphone tip through 220 ohm into `WHITE_RX`; headphone sleeve to red/R common |
 | Carbon mic | Pi/board 5V through 220 ohm minimum resistor and 10k mic-drive pot into `BLACK_MIC`; mic recording/gain coupling cap to ATR2x mic input |
 | Sidetone | Passive analog sidetone from `BLACK_MIC` through 470uF, 1k pot, and 10 ohm into `WHITE_RX` |
@@ -171,12 +171,12 @@ This document uses the following Rev A pin assignment:
 | Function | BCM GPIO | Physical pin | Logic |
 |---|---:|---:|---|
 | Hook input | GPIO17 | pin 11 | on-hook HIGH, off-hook LOW |
-| Dial pulse input | GPIO10 | pin 19 | open at rest, pulse closure to GND |
-| Ring relay output | GPIO23 | pin 16 | HIGH energizes relay |
+| Dial pulse input | GPIO22 | pin 15 | open at rest, pulse closure to GND |
+| Ring relay output | GPIO6 | pin 31 | HIGH energizes relay |
 | Board power | 5V | pin 2 or 4 | +5V rail |
 | Board ground | GND | pin 6 or any GND | common return |
 
-Current profile uses GPIO10 for dial pulse and GPIO23 for ring.
+Current profile uses GPIO22 for dial pulse and GPIO6 for ring.
 
 ---
 
@@ -205,8 +205,8 @@ flowchart LR
 
     subgraph PI["Raspberry Pi 5 + ATR2x"]
         GPIO17["GPIO17 hook"]
-        GPIO10["GPIO10 pulse"]
-        GPIO23["GPIO23 ring command"]
+        GPIO22["GPIO22 pulse"]
+        GPIO6["GPIO6 ring command"]
         PI5["Pi 5V"]
         PIGND["Pi GND"]
         ATRH["ATR2x headphone"]
@@ -215,9 +215,9 @@ flowchart LR
 
     PI5 --> BOARD
     PIGND --> BOARD
-    GPIO23 --> Q1 --> RELAY --> BM --> BELL
+    GPIO6 --> Q1 --> RELAY --> BM --> BELL
     HOOK --> GPIOIN --> GPIO17
-    DIAL --> GPIOIN --> GPIO10
+    DIAL --> GPIOIN --> GPIO22
     ATRH --> RX
     MIC --> MICBIAS --> ATRM
     MIC --> SIDETONE --> RX
@@ -262,7 +262,7 @@ Logic:
 
 DIAL PULSE INPUT
 
-GPIO10 physical pin 19 ---- 1k ---- BB
+GPIO22 physical pin 15 ---- 1k ---- BB
 board GND ------------------------- Y
 
 Logic:
@@ -272,7 +272,11 @@ Logic:
 
 RING RELAY DRIVER
 
-GPIO23 physical pin 16 ---- 1k ---- Q1 base
+GPIO6 physical pin 31 ---- 1k ---- Q1 base
+                                    |
+                                  5.1k
+                                    |
+                                  board GND
 Q1 emitter ------------------------ board GND
 Q1 collector ---------------------- relay coil -
 relay coil + ---------------------- board +5V
@@ -334,7 +338,11 @@ If electrolytic capacitor:
                           |          diode cathode/stripe to +5V
                           |
                        Q1 collector
-Pi GPIO23 -- 1k -- Q1 base
+Pi GPIO6 -- 1k -- Q1 base
+                       |
+                      5.1k
+                       |
+                      GND
                        Q1 emitter
                           |
                          GND
@@ -375,7 +383,7 @@ GPIO17 ---- 1k ---- BK --o/ o---- Y ---- GND
 
                  internal Pi pull-up
                          |
-GPIO10 ---- 1k ---- BB --o/ o---- Y ---- GND
+GPIO22 ---- 1k ---- BB --o/ o---- Y ---- GND
                   dial pulse contact
 ```
 
@@ -529,13 +537,16 @@ NET_HOOK_BK:
   GPIO17 through 1k, BK
 
 NET_PULSE_BB:
-  GPIO10 through 1k, BB
+  GPIO22 through 1k, BB
 
 NET_RING_CMD:
-  GPIO23 through 1k, Q1 base
+  GPIO6 through 1k, Q1 base
 
 NET_RELAY_LOW:
   relay coil -, Q1 collector, flyback diode anode
+
+NET_Q1_BASE:
+  R_Q1_BASE output, Q1 base, 5.1k pulldown to GND
 
 NET_BM_5V_SWITCHED:
   relay NO, Black Magic +5V input
@@ -617,8 +628,8 @@ Pi/control terminal block:
 | `PI_5V` | Pi physical pin 2 or 4 |
 | `PI_GND` | Pi ground |
 | `GPIO17_HOOK` | Pi physical pin 11 |
-| `GPIO10_PULSE` | Pi physical pin 19 |
-| `GPIO23_RING` | Pi physical pin 16 |
+| `GPIO22_PULSE` | Pi physical pin 15 |
+| `GPIO6_RING` | Pi physical pin 31 |
 
 Audio terminal block or cable tie points:
 
@@ -635,16 +646,17 @@ Audio terminal block or cable tie points:
 2. Add +5V/GND rails on perfboard.
 3. Add decoupling capacitors across +5V/GND.
 4. Build relay driver only.
-5. Test relay click from GPIO23 with relay contacts disconnected.
-6. Wire relay NO contact to switch Black Magic low-voltage +5V.
-7. Test Black Magic power switching with HV output disconnected.
-8. Connect Black Magic HV output to `L1/K`; verify bell rings.
-9. Add hook input `BK -> 1k -> GPIO17`; verify hook.
-10. Add pulse input `BB -> 1k -> GPIO10`; verify pulse count.
-11. Add receiver audio path with 220 ohm series resistor; verify playback at low volume.
-12. Add carbon mic drive and mic recording/gain coupling cap; verify recording.
-13. Add passive sidetone branch; start at minimum sidetone and tune by ear.
-14. Run full flow: ring, answer, ring stops by software, play audio, record mic, sidetone, dial.
+5. Confirm relay stays off at Pi boot before software starts.
+6. Test relay click from GPIO6 with relay contacts disconnected.
+7. Wire relay NO contact to switch Black Magic low-voltage +5V.
+8. Test Black Magic power switching with HV output disconnected.
+9. Connect Black Magic HV output to `L1/K`; verify bell rings.
+10. Add hook input `BK -> 1k -> GPIO17`; verify hook.
+11. Add pulse input `BB -> 1k -> GPIO22`; verify pulse count.
+12. Add receiver audio path with 220 ohm series resistor; verify playback at low volume.
+13. Add carbon mic drive and mic recording/gain coupling cap; verify recording.
+14. Add passive sidetone branch; start at minimum sidetone and tune by ear.
+15. Run full flow: ring, answer, ring stops by software, play audio, record mic, sidetone, dial.
 
 ## 8.4 Mechanical Recommendations
 
@@ -667,6 +679,7 @@ Before powering:
 - No Black Magic HV output lead has continuity to board GND.
 - No GPIO pin has continuity to +5V.
 - Relay coil has a flyback diode in the correct direction.
+- Q1 base has a 5.1k pulldown to GND so ring is off during boot.
 - Relay contact is NO, not NC.
 - `Y` has continuity to board GND.
 - `BK` does not have continuity to board GND on-hook.
@@ -712,14 +725,14 @@ Use this as the final sanity check:
 
 ```text
 Ring:
-  GPIO23 HIGH -> relay energizes -> Black Magic powers on -> bell rings on L1/K
+  GPIO6 HIGH -> relay energizes -> Black Magic powers on -> bell rings on L1/K
 
 Hook:
   GPIO17 HIGH -> on-hook
   GPIO17 LOW  -> off-hook
 
 Pulse:
-  GPIO10 rests HIGH and pulses LOW / gpiozero pressed during dial return
+  GPIO22 rests HIGH and pulses LOW / gpiozero pressed during dial return
 
 Audio out:
   ATR2x headphone tip -> 220 ohm -> WHITE_RX

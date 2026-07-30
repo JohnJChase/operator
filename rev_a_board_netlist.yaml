@@ -67,13 +67,13 @@ pi_pin_map:
     net: NET_GPIO17_HOOK_PI_SIDE
     logic: "on-hook HIGH, off-hook LOW"
   dial_pulse_input:
-    bcm: 10
-    physical: 19
-    net: NET_GPIO10_PULSE_PI_SIDE
+    bcm: 22
+    physical: 15
+    net: NET_GPIO22_PULSE_PI_SIDE
     logic: "open at rest; pulse closure to GND; count gpiozero when_pressed"
   ring_output:
-    bcm: 23
-    physical: 16
+    bcm: 6
+    physical: 31
     net: NET_RING_CMD
     logic: "HIGH energizes relay"
   board_power_5v:
@@ -109,11 +109,15 @@ components:
   - ref: R_PULSE
     type: resistor
     value: 1k
-    role: GPIO10_series_protection
+    role: GPIO22_series_protection
   - ref: R_Q1_BASE
     type: resistor
     value: 1k
     role: relay_driver_base_limit
+  - ref: R_Q1_PULLDOWN
+    type: resistor
+    value: "5.1k"
+    role: ring_boot_failsafe_base_pulldown
   - ref: R_HP_SERIES
     type: resistor
     value: "220 ohm"
@@ -179,6 +183,7 @@ nets:
       - "PHONE Y control common"
       - "PHONE red/R handset common"
       - "Q1 emitter"
+      - "R_Q1_PULLDOWN pin 2"
       - "BM1 low-voltage GND input"
       - "ATR2X headphone sleeve"
       - "ATR2X mic sleeve"
@@ -198,10 +203,10 @@ nets:
       - "PHONE BK"
     logic: "HIGH on-hook through Pi pull-up; LOW off-hook when BK closes to Y/GND"
 
-  NET_GPIO10_PULSE_PI_SIDE:
+  NET_GPIO22_PULSE_PI_SIDE:
     description: "Pi side of pulse input protection resistor"
     connections:
-      - "PI GPIO10 physical pin 19"
+      - "PI GPIO22 physical pin 15"
       - "R_PULSE pin 1"
 
   NET_PULSE_BB:
@@ -214,7 +219,7 @@ nets:
   NET_RING_CMD:
     description: "Pi ring relay command"
     connections:
-      - "PI GPIO23 physical pin 16"
+      - "PI GPIO6 physical pin 31"
       - "R_Q1_BASE pin 1"
     logic: "HIGH requests ring"
 
@@ -223,6 +228,7 @@ nets:
     connections:
       - "R_Q1_BASE pin 2"
       - "Q1 base"
+      - "R_Q1_PULLDOWN pin 1"
 
   NET_RELAY_LOW:
     description: "Relay coil low side switched by Q1"
@@ -322,14 +328,14 @@ truth_table:
     pulse: LOW
     event: "gpiozero Button.when_pressed"
   ring:
-    GPIO23_LOW: "relay off; Black Magic unpowered"
-    GPIO23_HIGH: "relay on; Black Magic powered; bell rings if connected"
+    GPIO6_LOW: "relay off; Black Magic unpowered"
+    GPIO6_HIGH: "relay on; Black Magic powered; bell rings if connected"
 
 software_requirements:
   - "Use internal pull-up on GPIO17."
   - "Treat GPIO17 LOW as off-hook."
-  - "Use Pi pull-up on GPIO10 and count Button.when_pressed closure events."
-  - "Turn GPIO23 LOW immediately when GPIO17 reports off-hook during ringing."
+  - "Use Pi pull-up on GPIO22 and count Button.when_pressed closure events."
+  - "Turn GPIO6 LOW immediately when GPIO17 reports off-hook during ringing."
   - "Rev A hardware sidetone is passive analog; optional software sidetone must be owned by the application audio router."
 
 safety_rules:

@@ -95,8 +95,8 @@ The proposed architecture is directionally excellent:
 
 The current build plan makes these decisions explicit:
 
-1. Use Rev A direct-bypass hardware with hook on GPIO17, dial pulse on GPIO10,
-   and ring on GPIO23.
+1. Use Rev A direct-bypass hardware with hook on GPIO17, dial pulse on GPIO22,
+   and ring on GPIO6.
 2. Dial polarity is fixed by the current hardware profile: the contact is open
    at rest and closes to ground on each return pulse. Timing calibration is
    useful; web-configurable polarity is not required.
@@ -135,8 +135,8 @@ the file is stale and should be corrected or removed.
 ### Current implementation rules
 
 - Hook pin: GPIO17.
-- Dial pulse pin: GPIO10.
-- Ring relay pin: GPIO23.
+- Dial pulse pin: GPIO22.
+- Ring relay pin: GPIO6.
 - Dial pulse contact is open at rest and closes to GND during dial return.
 - Count dial pulses with `gpiozero.Button.when_pressed`.
 - Direct bypass audio is the Rev A design.
@@ -156,11 +156,11 @@ the file is stale and should be corrected or removed.
 
 ```yaml
 hardware_profile:
-  name: rev_a_direct_bypass_gpio10
+  name: rev_a_direct_bypass_gpio22
   gpio:
     hook_bcm: 17
-    dial_pulse_bcm: 10
-    ring_bcm: 23
+    dial_pulse_bcm: 22
+    ring_bcm: 6
   dial:
     mode: pulse_only
     off_normal_available: false
@@ -192,7 +192,7 @@ hardware_profile:
 - Ring command: Pi GPIO drives NPN relay driver; relay switches Black Magic
   low-voltage input.
 - Hook: `BK-Y`, on-hook HIGH, off-hook LOW.
-- Dial pulse: `BB-Y`, GPIO10, pulse-only, no GPIO-suitable off-normal.
+- Dial pulse: `BB-Y`, GPIO22, pulse-only, no GPIO-suitable off-normal.
   Contact is open at rest and closes to GND on dial return pulses. Count
   `gpiozero.Button.when_pressed` events.
 - Board power: Pi 5V header powers relay, mic drive, and Black Magic
@@ -683,7 +683,7 @@ Tasks:
   `uv.lock`, `justfile`, `.env.example`, and the minimal package.
 - Read `AGENTS.md` and adopt it before coding.
 - Create `config/hardware_profile.yaml`.
-- Confirm GPIO17 hook, GPIO10 dial, and GPIO23 ring.
+- Confirm GPIO17 hook, GPIO22 dial, and GPIO6 ring.
 - Confirm dial contact is open at rest and closes to GND on return pulses.
 - Verify ALSA device, receiver playback, mic capture, ring cadence, and ring
   cutoff.
@@ -735,8 +735,8 @@ loop.
 Tasks:
 
 - Implement real hook read/debounce.
-- Implement real dial pulse counting with GPIO10 `when_pressed`.
-- Implement ring start/stop with GPIO23 and software off-hook cutoff.
+- Implement real dial pulse counting with GPIO22 `when_pressed`.
+- Implement ring start/stop with GPIO6 and software off-hook cutoff.
 - Add CLI diagnostics:
   - `operator-os trace-hook`
   - `operator-os trace-dial`
@@ -1013,8 +1013,8 @@ requires it.
 
 Build phase by phase. Do not proceed to the next phase until the current phase
 acceptance criteria pass. Phase 0 is mandatory but should be a smoke
-verification, not a rediscovery expedition. Confirm GPIO17 hook, GPIO10 dial
-pulse, GPIO23 ring, ALSA device, ring cutoff, receiver playback, and mic capture.
+verification, not a rediscovery expedition. Confirm GPIO17 hook, GPIO22 dial
+pulse, GPIO6 ring, ALSA device, ring cutoff, receiver playback, and mic capture.
 
 Core rules:
 - lazy senior developer mode: understand first, then write the least code that
@@ -1022,7 +1022,7 @@ Core rules:
 - one process owns GPIO
 - `audio.py` owns all handset audio subprocesses
 - explicit small state machine controls behavior
-- dial is pulse-only on GPIO10; no off-normal input
+- dial is pulse-only on GPIO22; no off-normal input
 - dial contact is open at rest and closes to GND; count gpiozero when_pressed
 - ring cutoff is software; hardware interlock is not desired
 - tests must run in simulator mode without Pi hardware
