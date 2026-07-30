@@ -20,6 +20,28 @@ Allowed Mac intents in Rev A:
 
 There is deliberately no `run_shell` command.
 
+## Pi-side architecture
+
+Desktop integration has one boundary module:
+
+```text
+operator_os.desktop_bridge
+```
+
+Responsibilities:
+
+| Layer | Responsibility |
+|-------|----------------|
+| `DesktopRegistry` | client presence, capabilities, per-client queues, acknowledgements |
+| `DesktopBridge` | named product intents: open URL, open meeting, notify, notify inbound SMS |
+| `ConsoleHub` | thread-safe owner used by the phone loop and HTTP server |
+| `ConsoleHttpServer` | transport only: auth, register, SSE stream, ack, diagnostic API |
+| `operator_os.main` | phone state decisions; calls named desktop intents only |
+
+Feature code should not build raw `desktop.*` payloads. Add a named method to
+`DesktopBridge` first, add one small test, then call that method from the
+feature path.
+
 ## Pi setup
 
 Set these in the Pi `.env`:

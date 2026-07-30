@@ -12,7 +12,9 @@ import pytest
 from operator_os.console_hub import ConsoleHub
 from operator_os.console_http import ConsoleHttpServer
 from operator_os.desktop_bridge import (
+    DesktopBridge,
     DesktopRegistry,
+    meeting_title,
     meet_video_url,
     sms_notification_payload,
     validate_open_url,
@@ -61,6 +63,45 @@ def test_meet_video_url_from_dial_in():
         conference_id="abc-defg-hij",
     )
     assert meet_video_url(dial) == "https://meet.google.com/abc-defg-hij"
+    assert meeting_title(dial) == "Standup"
+
+
+def test_desktop_bridge_named_intents():
+    bridge = DesktopBridge()
+    client = bridge.register_client("macbook", "MacBook", ["open_url", "notify"])
+    cid = client["client_id"]
+    bridge.connect_client(cid)
+
+    meet = MeetDialIn(
+        title="Standup",
+        e164="+15550100999",
+        conference_id="abc-defg-hij",
+    )
+    delivery = bridge.open_meeting(meet)
+    assert delivery.ok
+    cmd = bridge.next_command(cid, timeout_s=0.01)
+    assert cmd == delivery.command
+    assert cmd["type"] == "desktop.open_url"
+    assert cmd["payload"]["url"] == "https://meet.google.com/abc-defg-hij"
+
+    delivery = bridge.notify_inbound_sms(
+        message_id=7,
+        from_e164="+15551234567",
+        from_name="Alice",
+        body="hello",
+    )
+    assert delivery.ok
+    cmd = bridge.next_command(cid, timeout_s=0.01)
+    assert cmd == delivery.command
+    assert cmd["type"] == "desktop.notify"
+    assert cmd["payload"]["title"] == "Message from Alice"
+
+
+def test_desktop_bridge_reports_no_client_for_intent():
+    bridge = DesktopBridge()
+    delivery = bridge.notify(title="Operator", body="hello")
+    assert not delivery.ok
+    assert delivery.reason == "no_client"
 
 
 def test_sms_notification_payload_prefers_contact_name_and_truncates():
@@ -138,14 +179,13 @@ def test_http_desktop_sse_receives_queued_command(monkeypatch: pytest.MonkeyPatc
         assert event == "ready"
         assert data["ok"] is True
 
-        cmd = hub.queue_desktop_command(
-            "desktop.open_url",
-            {"url": "https://meet.google.com/abc-defg-hij"},
+        delivery = hub.request_desktop_open_url(
+            url="https://meet.google.com/abc-defg-hij",
         )
-        assert cmd is not None
+        assert delivery.ok
         event, data = _read_sse(resp)
         assert event == "command"
-        assert data["id"] == cmd["id"]
+        assert data["id"] == delivery.command["id"]
         assert data["payload"]["url"] == "https://meet.google.com/abc-defg-hij"
     finally:
         resp.close()

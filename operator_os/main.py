@@ -352,11 +352,9 @@ def run_loop(
     )
     from operator_os.console_http import ConsoleHttpServer
     from operator_os.desktop_bridge import (
-        desktop_client_target,
         desktop_token,
+        meeting_title,
         meet_join_target,
-        meet_video_url,
-        sms_notification_payload,
     )
 
     console_hub = ConsoleHub(events_tail=lambda: list(events.recent))
@@ -820,9 +818,8 @@ def run_loop(
 
     def _meet_desktop_ready() -> bool:
         target = meet_join_target()
-        return target in ("desktop", "auto") and console_hub.desktop.has_online_client(
-            capability="open_url",
-            target_id=desktop_client_target(),
+        return target in ("desktop", "auto") and console_hub.has_desktop_client(
+            capability="open_url"
         )
 
     def _meet_should_open_desktop() -> bool:
@@ -833,36 +830,26 @@ def run_loop(
 
     def _arm_meet_desktop(meet, *, wait: bool) -> bool:
         nonlocal expect_service_done
-        title = _meet_title(meet)
-        url = meet_video_url(meet)
-        if not url:
+        title = meeting_title(meet)
+        delivery = console_hub.request_desktop_open_meeting(meet)
+        if not delivery.ok and delivery.reason == "no_meet_url":
             audio.speak("That meeting does not have a desktop link.", wait=False)
             expect_service_done = True
             return False
-        cmd = console_hub.queue_desktop_command(
-            "desktop.open_url",
-            {"url": url, "title": title},
-            target_id=desktop_client_target(),
-        )
-        if cmd is None:
+        if not delivery.ok:
             audio.speak("Your Mac is not connected.", wait=False)
             expect_service_done = True
             return False
         audio.speak(f"Opening {title} on your Mac.", wait=wait)
+        url = (delivery.command or {}).get("payload", {}).get("url", "")
         events.emit("desktop", value="open_meet", detail=url)
         _status(f"desktop: open meet {url}")
         expect_service_done = not wait
         return True
 
-    def _meet_title(meet) -> str:
-        title = " ".join((meet.title or "").split()) or "the meeting"
-        if len(title) > 48:
-            title = title[:45].rstrip() + "…"
-        return title
-
     def _arm_meet_call(meet) -> None:
         nonlocal sip_dest, sip_dtmf
-        title = _meet_title(meet)
+        title = meeting_title(meet)
         audio.speak(f"Connecting to {title}.", wait=True)
         events.emit("calendar", value="join", detail=meet.e164)
         sip_dest = meet.e164
@@ -915,17 +902,13 @@ def run_loop(
         msg = store.get_message(message_id)
         if msg is None:
             return
-        cmd = console_hub.queue_desktop_command(
-            "desktop.notify",
-            sms_notification_payload(
-                message_id=msg.id,
-                from_e164=msg.from_e164,
-                from_name=display_name(msg.from_e164),
-                body=msg.body,
-            ),
-            target_id=desktop_client_target(),
+        delivery = console_hub.request_desktop_sms_notification(
+            message_id=msg.id,
+            from_e164=msg.from_e164,
+            from_name=display_name(msg.from_e164),
+            body=msg.body,
         )
-        if cmd is not None:
+        if delivery.ok:
             events.emit("desktop", value="sms_notify", digit=message_id)
             _status(f"desktop: sms notify id={message_id}")
 

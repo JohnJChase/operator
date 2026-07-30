@@ -47,6 +47,13 @@ def meet_video_url(meeting: Any) -> str:
     return f"https://meet.google.com/{cid}"
 
 
+def meeting_title(meeting: Any) -> str:
+    title = " ".join(str(getattr(meeting, "title", "") or "").split()) or "the meeting"
+    if len(title) > 48:
+        title = title[:45].rstrip() + "..."
+    return title
+
+
 def sms_notification_payload(
     *,
     message_id: int,
@@ -64,6 +71,13 @@ def sms_notification_payload(
         "message_id": int(message_id),
         "from_e164": from_e164,
     }
+
+
+@dataclass(frozen=True)
+class DesktopDelivery:
+    ok: bool
+    reason: str = ""
+    command: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -283,3 +297,116 @@ def _put_drop_oldest(q: queue.Queue[dict[str, Any]], item: dict[str, Any]) -> No
     except queue.Empty:
         pass
     q.put_nowait(item)
+
+
+@dataclass
+class DesktopBridge:
+    """Pi-side desktop boundary.
+
+    Feature code should call the named intent methods here. Raw command queueing
+    stays available for HTTP diagnostics, but normal product flows should not
+    build ``desktop.*`` payloads themselves.
+    """
+
+    registry: DesktopRegistry = field(default_factory=DesktopRegistry)
+
+    def register_client(
+        self, client_id: str, name: str, capabilities: list[str]
+    ) -> dict[str, Any]:
+        return self.registry.register(client_id, name, capabilities)
+
+    def connect_client(self, client_id: str) -> dict[str, Any]:
+        return self.registry.connect(client_id)
+
+    def disconnect_client(self, client_id: str) -> None:
+        self.registry.disconnect(client_id)
+
+    def next_command(
+        self, client_id: str, *, timeout_s: float = 15.0
+    ) -> dict[str, Any] | None:
+        return self.registry.next_command(client_id, timeout_s=timeout_s)
+
+    def ack_command(
+        self, client_id: str, command_id: str, status: str, message: str = ""
+    ) -> None:
+        self.registry.ack(client_id, command_id, status, message)
+
+    def clients(self) -> list[dict[str, Any]]:
+        return self.registry.clients()
+
+    def has_client(self, *, capability: str | None = None, target_id: str = "") -> bool:
+        return self.registry.has_online_client(
+            capability=capability,
+            target_id=target_id or desktop_client_target(),
+        )
+
+    def open_url(self, *, url: str, title: str = "", target_id: str = "") -> DesktopDelivery:
+        return self._queue(
+            "desktop.open_url",
+            {"url": url, "title": str(title or "")[:120]},
+            target_id=target_id,
+        )
+
+    def open_meeting(self, meeting: Any, *, target_id: str = "") -> DesktopDelivery:
+        url = meet_video_url(meeting)
+        if not url:
+            return DesktopDelivery(False, reason="no_meet_url")
+        return self.open_url(url=url, title=meeting_title(meeting), target_id=target_id)
+
+    def notify(
+        self,
+        *,
+        title: str,
+        body: str,
+        extra: dict[str, Any] | None = None,
+        target_id: str = "",
+    ) -> DesktopDelivery:
+        payload = dict(extra or {})
+        payload["title"] = str(title or "Operator")[:80]
+        payload["body"] = str(body or "")[:240]
+        return self._queue("desktop.notify", payload, target_id=target_id)
+
+    def notify_inbound_sms(
+        self,
+        *,
+        message_id: int,
+        from_e164: str,
+        body: str,
+        from_name: str | None = None,
+        target_id: str = "",
+    ) -> DesktopDelivery:
+        payload = sms_notification_payload(
+            message_id=message_id,
+            from_e164=from_e164,
+            from_name=from_name,
+            body=body,
+        )
+        return self._queue("desktop.notify", payload, target_id=target_id)
+
+    def queue_raw(
+        self,
+        command_type: str,
+        payload: dict[str, Any],
+        *,
+        target_id: str = "",
+    ) -> DesktopDelivery:
+        return self._queue(command_type, payload, target_id=target_id)
+
+    def _queue(
+        self,
+        command_type: str,
+        payload: dict[str, Any],
+        *,
+        target_id: str = "",
+    ) -> DesktopDelivery:
+        try:
+            cmd = self.registry.queue_command(
+                command_type,
+                payload,
+                target_id=target_id or desktop_client_target(),
+            )
+        except ValueError as e:
+            return DesktopDelivery(False, reason=str(e))
+        if cmd is None:
+            return DesktopDelivery(False, reason="no_client")
+        return DesktopDelivery(True, command=cmd)

@@ -12,7 +12,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from operator_os.desktop_bridge import DesktopRegistry
+from operator_os.desktop_bridge import DesktopBridge, DesktopDelivery
 
 
 DEFAULT_PORT = 8788
@@ -51,7 +51,7 @@ class ConsoleHub:
     _outside_buffer: str = field(default="", init=False)
     _last_event: str = field(default="", init=False)
     _last_reason: str = field(default="", init=False)
-    desktop: DesktopRegistry = field(default_factory=DesktopRegistry)
+    desktop: DesktopBridge = field(default_factory=DesktopBridge)
     _session_ttl_s: float = 86400.0
 
     def note_digit(self, digit: int) -> None:
@@ -92,16 +92,19 @@ class ConsoleHub:
         with self._lock:
             return {**self._status, "desktop_clients": self.desktop.clients()}
 
+    def has_desktop_client(self, *, capability: str | None = None) -> bool:
+        return self.desktop.has_client(capability=capability)
+
     def register_desktop_client(
         self, client_id: str, name: str, capabilities: list[str]
     ) -> dict[str, Any]:
-        return self.desktop.register(client_id, name, capabilities)
+        return self.desktop.register_client(client_id, name, capabilities)
 
     def connect_desktop_client(self, client_id: str) -> dict[str, Any]:
-        return self.desktop.connect(client_id)
+        return self.desktop.connect_client(client_id)
 
     def disconnect_desktop_client(self, client_id: str) -> None:
-        self.desktop.disconnect(client_id)
+        self.desktop.disconnect_client(client_id)
 
     def next_desktop_command(
         self, client_id: str, *, timeout_s: float = 15.0
@@ -115,12 +118,46 @@ class ConsoleHub:
         *,
         target_id: str = "",
     ) -> dict[str, Any] | None:
-        return self.desktop.queue_command(command_type, payload, target_id=target_id)
+        delivery = self.desktop.queue_raw(command_type, payload, target_id=target_id)
+        return delivery.command if delivery.ok else None
+
+    def request_desktop_open_url(
+        self, *, url: str, title: str = "", target_id: str = ""
+    ) -> DesktopDelivery:
+        return self.desktop.open_url(url=url, title=title, target_id=target_id)
+
+    def request_desktop_open_meeting(self, meeting: Any) -> DesktopDelivery:
+        return self.desktop.open_meeting(meeting)
+
+    def request_desktop_notify(
+        self,
+        *,
+        title: str,
+        body: str,
+        extra: dict[str, Any] | None = None,
+        target_id: str = "",
+    ) -> DesktopDelivery:
+        return self.desktop.notify(title=title, body=body, extra=extra, target_id=target_id)
+
+    def request_desktop_sms_notification(
+        self,
+        *,
+        message_id: int,
+        from_e164: str,
+        body: str,
+        from_name: str | None = None,
+    ) -> DesktopDelivery:
+        return self.desktop.notify_inbound_sms(
+            message_id=message_id,
+            from_e164=from_e164,
+            body=body,
+            from_name=from_name,
+        )
 
     def ack_desktop_command(
         self, client_id: str, command_id: str, status: str, message: str = ""
     ) -> None:
-        self.desktop.ack(client_id, command_id, status, message)
+        self.desktop.ack_command(client_id, command_id, status, message)
 
     def request_ring_test(self) -> bool:
         """Queue a ring test. Returns False if one already pending."""

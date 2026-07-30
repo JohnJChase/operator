@@ -23,7 +23,6 @@ from operator_os.console_hub import (
 from operator_os.desktop_bridge import (
     desktop_client_target,
     desktop_token,
-    validate_open_url,
 )
 
 STATIC_DIR = Path(__file__).resolve().parent / "console_static"
@@ -357,35 +356,28 @@ class ConsoleHttpServer:
                     return
                 if path == "/api/desktop/open-url":
                     data = self._read_json()
-                    try:
-                        url = validate_open_url(str(data.get("url") or ""))
-                    except ValueError as e:
-                        self._err(400, str(e))
-                        return
-                    cmd = hub.queue_desktop_command(
-                        "desktop.open_url",
-                        {"url": url, "title": str(data.get("title") or "")[:120]},
+                    delivery = hub.request_desktop_open_url(
+                        url=str(data.get("url") or ""),
+                        title=str(data.get("title") or ""),
                         target_id=str(data.get("client_id") or desktop_client_target()),
                     )
-                    if cmd is None:
-                        self._err(409, "no desktop client online")
+                    if not delivery.ok:
+                        code = 400 if delivery.reason.startswith("url ") else 409
+                        self._err(code, delivery.reason or "no desktop client online")
                         return
-                    self._ok_json({"ok": True, "command": cmd})
+                    self._ok_json({"ok": True, "command": delivery.command})
                     return
                 if path == "/api/desktop/notify":
                     data = self._read_json()
-                    cmd = hub.queue_desktop_command(
-                        "desktop.notify",
-                        {
-                            "title": str(data.get("title") or "Operator")[:80],
-                            "body": str(data.get("body") or "")[:240],
-                        },
+                    delivery = hub.request_desktop_notify(
+                        title=str(data.get("title") or "Operator"),
+                        body=str(data.get("body") or ""),
                         target_id=str(data.get("client_id") or desktop_client_target()),
                     )
-                    if cmd is None:
-                        self._err(409, "no desktop client online")
+                    if not delivery.ok:
+                        self._err(409, delivery.reason or "no desktop client online")
                         return
-                    self._ok_json({"ok": True, "command": cmd})
+                    self._ok_json({"ok": True, "command": delivery.command})
                     return
                 if path == "/api/inbox/sms/heard":
                     data = self._read_json()
