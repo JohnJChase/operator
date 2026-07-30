@@ -72,6 +72,31 @@ final class BridgeClient: ObservableObject {
         }
     }
 
+    /// Ask the Pi to queue a notify to this client (proves SSE command path).
+    func requestTestNotify(settings: StationSettings) async {
+        let base = settings.normalizedBaseURL
+        let token = settings.token.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clientID = settings.clientID.trimmingCharacters(in: .whitespacesAndNewlines)
+        appendLog("ping notify → Pi as \(clientID)")
+        do {
+            let url = try apiURL(base: base, path: "/api/desktop/notify")
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "title": "Operator Station",
+                "body": "Test notify from Settings",
+                "client_id": clientID,
+            ])
+            let (data, response) = try await shortSession.data(for: request)
+            try throwIfNeeded(response: response, data: data)
+            appendLog("ping accepted by Pi (wait for command…)")
+        } catch {
+            appendLog("ping failed: \(error.localizedDescription)")
+        }
+    }
+
     private func runLoop(base: String, token: String, clientID: String, name: String) async {
         while !Task.isCancelled {
             do {
@@ -122,8 +147,11 @@ final class BridgeClient: ObservableObject {
         var event = ""
         var dataLines: [String] = []
         var lastKeepaliveLog = Date.distantPast
-        for try await line in bytes.lines {
+        for try await rawLine in bytes.lines {
             try Task.checkCancellation()
+            // URLSession may leave a trailing \r when the peer uses CRLF; that
+            // breaks `event == "command"` / `"ready"` while keepalives still work.
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             if line.isEmpty {
                 await handleSSE(
                     base: base,
@@ -145,11 +173,14 @@ final class BridgeClient: ObservableObject {
                 continue
             }
             if line.hasPrefix("event:") {
-                event = String(line.dropFirst("event:".count)).trimmingCharacters(in: .whitespaces)
+                event = String(line.dropFirst("event:".count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
             } else if line.hasPrefix("data:") {
-                var value = String(line.dropFirst("data:".count))
-                if value.hasPrefix(" ") { value = String(value.dropFirst()) }
+                let value = String(line.dropFirst("data:".count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 dataLines.append(value)
+            } else {
+                appendLog("sse ignore: \(line.prefix(80))")
             }
         }
         throw BridgeError.streamEnded
@@ -163,21 +194,22 @@ final class BridgeClient: ObservableObject {
         dataLines: [String]
     ) async {
         guard !dataLines.isEmpty else { return }
+        let eventName = event.trimmingCharacters(in: .whitespacesAndNewlines)
         let raw = dataLines.joined(separator: "\n")
         guard let data = raw.data(using: .utf8),
               let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            appendLog("bad sse json event=\(event)")
+            appendLog("bad sse json event=\(eventName)")
             return
         }
 
-        if event == "ready" {
+        if eventName == "ready" {
             lastEvent = "ready"
             appendLog("stream ready")
             return
         }
-        if event != "command" {
-            appendLog("sse event=\(event.isEmpty ? "(none)" : event)")
+        if eventName != "command" {
+            appendLog("sse event=\(eventName.isEmpty ? "(none)" : eventName)")
             return
         }
 

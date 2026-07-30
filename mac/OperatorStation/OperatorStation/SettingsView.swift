@@ -26,6 +26,10 @@ struct SettingsView: View {
                     Button("Disconnect") {
                         bridge.stop()
                     }
+                    Button("Ping notify") {
+                        Task { await bridge.requestTestNotify(settings: settings) }
+                    }
+                    .disabled(!bridge.state.isOnline)
                 }
             }
             Section("Log") {

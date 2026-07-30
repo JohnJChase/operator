@@ -1,10 +1,13 @@
 import Foundation
 
-/// Pi connection settings. Token lives in Keychain; the rest in UserDefaults.
+/// Pi connection settings in UserDefaults.
+///
+/// The desktop token is the same LAN shared secret as ``OPERATOR_DESKTOP_TOKEN``;
+/// Keychain is overkill here and was prompting for the Mac password on every
+/// launch (read + rewrite in ``didSet``).
 @MainActor
 final class StationSettings: ObservableObject {
     private static let defaults = UserDefaults.standard
-    private static let tokenAccount = "operator.desktop.token"
 
     @Published var piURL: String {
         didSet { Self.defaults.set(piURL, forKey: "piURL") }
@@ -19,7 +22,7 @@ final class StationSettings: ObservableObject {
     }
 
     @Published var token: String {
-        didSet { Keychain.set(token, account: Self.tokenAccount) }
+        didSet { Self.defaults.set(token, forKey: "desktopToken") }
     }
 
     var isConfigured: Bool {
@@ -34,40 +37,8 @@ final class StationSettings: ObservableObject {
     init() {
         let host = Host.current().localizedName ?? "Mac"
         piURL = Self.defaults.string(forKey: "piURL") ?? "http://operator.local:8788"
-        clientID = Self.defaults.string(forKey: "clientID") ?? host.lowercased().replacingOccurrences(of: " ", with: "-")
+        clientID = Self.defaults.string(forKey: "clientID") ?? "john-macbook"
         displayName = Self.defaults.string(forKey: "displayName") ?? "\(host) Mac"
-        token = Keychain.get(account: Self.tokenAccount) ?? ""
-    }
-}
-
-enum Keychain {
-    private static let service = "com.northleft.OperatorStation"
-
-    static func set(_ value: String, account: String) {
-        let data = Data(value.utf8)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(query as CFDictionary)
-        guard !value.isEmpty else { return }
-        var add = query
-        add[kSecValueData as String] = data
-        SecItemAdd(add as CFDictionary, nil)
-    }
-
-    static func get(account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        token = Self.defaults.string(forKey: "desktopToken") ?? ""
     }
 }

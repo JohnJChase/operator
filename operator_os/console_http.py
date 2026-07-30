@@ -296,6 +296,20 @@ class ConsoleHttpServer:
                     )
                     self._ok_json({"ok": True})
                     return
+                if path == "/api/desktop/notify":
+                    if not self._require_inbox_auth():
+                        return
+                    data = self._read_json()
+                    delivery = hub.request_desktop_notify(
+                        title=str(data.get("title") or "Operator"),
+                        body=str(data.get("body") or ""),
+                        target_id=str(data.get("client_id") or ""),
+                    )
+                    if not delivery.ok:
+                        self._err(409, delivery.reason or "no desktop client online")
+                        return
+                    self._ok_json({"ok": True, "command": delivery.command})
+                    return
                 if path == "/api/login":
                     n = int(self.headers.get("Content-Length") or 0)
                     raw = self.rfile.read(n) if n else b""
@@ -393,19 +407,6 @@ class ConsoleHttpServer:
                     if not delivery.ok:
                         code = 400 if delivery.reason.startswith("url ") else 409
                         self._err(code, delivery.reason or "no desktop client online")
-                        return
-                    self._ok_json({"ok": True, "command": delivery.command})
-                    return
-                if path == "/api/desktop/notify":
-                    data = self._read_json()
-                    # Empty client_id → fan-out; do not apply preferred meet target.
-                    delivery = hub.request_desktop_notify(
-                        title=str(data.get("title") or "Operator"),
-                        body=str(data.get("body") or ""),
-                        target_id=str(data.get("client_id") or ""),
-                    )
-                    if not delivery.ok:
-                        self._err(409, delivery.reason or "no desktop client online")
                         return
                     self._ok_json({"ok": True, "command": delivery.command})
                     return
