@@ -16,6 +16,10 @@ from urllib.parse import urlparse
 DESKTOP_TTL_S = 45.0
 DESKTOP_COMMAND_TYPES = {"desktop.open_url", "desktop.notify"}
 
+
+class DesktopStreamSuperseded(Exception):
+    """This SSE connection is no longer the active one for the client."""
+
 # Product routing keys (wire protocol stays desktop.* / open_url / notify).
 INTENT_OPEN_URL = "open.url"
 INTENT_OPEN_MEETING = "open.meeting"
@@ -251,16 +255,38 @@ class DesktopRegistry:
                 first = dict(cmd)
         return first
 
-    def next_command(self, client_id: str, *, timeout_s: float = 15.0) -> dict[str, Any] | None:
+    def next_command(
+        self,
+        client_id: str,
+        *,
+        timeout_s: float = 15.0,
+        generation: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Wait for the next queued command.
+
+        When ``generation`` is set, return only while that SSE stream is still
+        current. A superseded waiter exits without consuming the queue so a
+        zombie connection (Mac relaunch) cannot steal notifies from the live
+        stream.
+        """
         cid = _clean_id(client_id)
         with self._lock:
             q = self._queues.setdefault(cid, queue.Queue(maxsize=100))
         self.touch(cid)
-        try:
-            return q.get(timeout=timeout_s)
-        except queue.Empty:
-            self.touch(cid)
-            return None
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            if generation is not None:
+                with self._lock:
+                    if self._conn_gen.get(cid) != generation:
+                        raise DesktopStreamSuperseded
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.touch(cid)
+                return None
+            try:
+                return q.get(timeout=min(0.25, remaining))
+            except queue.Empty:
+                continue
 
     def ack(self, client_id: str, command_id: str, status: str, message: str = "") -> None:
         cid = _clean_id(client_id)
@@ -371,9 +397,15 @@ class DesktopBridge:
         self.registry.disconnect(client_id, generation=generation)
 
     def next_command(
-        self, client_id: str, *, timeout_s: float = 15.0
+        self,
+        client_id: str,
+        *,
+        timeout_s: float = 15.0,
+        generation: int | None = None,
     ) -> dict[str, Any] | None:
-        return self.registry.next_command(client_id, timeout_s=timeout_s)
+        return self.registry.next_command(
+            client_id, timeout_s=timeout_s, generation=generation
+        )
 
     def ack_command(
         self, client_id: str, command_id: str, status: str, message: str = ""

@@ -112,9 +112,15 @@ class ConsoleHub:
         self.desktop.disconnect_client(client_id, generation=generation)
 
     def next_desktop_command(
-        self, client_id: str, *, timeout_s: float = 15.0
+        self,
+        client_id: str,
+        *,
+        timeout_s: float = 15.0,
+        generation: int | None = None,
     ) -> dict[str, Any] | None:
-        return self.desktop.next_command(client_id, timeout_s=timeout_s)
+        return self.desktop.next_command(
+            client_id, timeout_s=timeout_s, generation=generation
+        )
 
     def queue_desktop_command(
         self,

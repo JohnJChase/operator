@@ -21,6 +21,7 @@ from operator_os.console_hub import (
     session_cookie_name,
 )
 from operator_os.desktop_bridge import (
+    DesktopStreamSuperseded,
     desktop_client_target,
     desktop_token,
 )
@@ -243,12 +244,16 @@ class ConsoleHttpServer:
                 try:
                     self._send_sse("ready", {"ok": True, "client": client})
                     while True:
-                        cmd = hub.next_desktop_command(client_id, timeout_s=15.0)
+                        cmd = hub.next_desktop_command(
+                            client_id, timeout_s=15.0, generation=conn_gen
+                        )
                         if cmd is None:
                             self.wfile.write(b": keepalive\n\n")
                             self.wfile.flush()
                         else:
                             self._send_sse("command", cmd)
+                except DesktopStreamSuperseded:
+                    return
                 except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
                     hub.disconnect_desktop_client(client_id, generation=conn_gen)
 

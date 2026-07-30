@@ -14,6 +14,7 @@ from operator_os.console_http import ConsoleHttpServer
 from operator_os.desktop_bridge import (
     DesktopBridge,
     DesktopRegistry,
+    DesktopStreamSuperseded,
     meeting_title,
     meet_video_url,
     sms_notification_payload,
@@ -131,6 +132,23 @@ def test_stale_sse_disconnect_does_not_offline_newer_stream():
 
     reg.disconnect(cid, generation=gen2)
     assert not reg.has_online_client(capability="notify")
+
+
+def test_superseded_sse_waiter_does_not_steal_commands():
+    reg = DesktopRegistry()
+    client = reg.register("macbook", "MacBook", ["notify"])
+    cid = client["client_id"]
+    _, gen1 = reg.connect(cid)
+    _, gen2 = reg.connect(cid)
+
+    with pytest.raises(DesktopStreamSuperseded):
+        reg.next_command(cid, timeout_s=0.3, generation=gen1)
+
+    bridge = DesktopBridge(registry=reg)
+    delivery = bridge.notify(title="Operator", body="hi")
+    assert delivery.ok
+    cmd = reg.next_command(cid, timeout_s=0.2, generation=gen2)
+    assert cmd == delivery.command
 
 
 def test_notify_fans_out_ignoring_preferred_client(monkeypatch: pytest.MonkeyPatch):
