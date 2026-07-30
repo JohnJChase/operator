@@ -101,6 +101,16 @@ mac-client: listening
 mac-client: stream ready
 ```
 
+Notification commands log their visible content:
+
+```text
+mac-client: notified: Message from Alice: Running ten minutes late.
+```
+
+If that line appears but no macOS banner appears, the bridge worked and macOS
+hid the notification. Check Focus / Do Not Disturb and notification permissions
+for the terminal app running `just mac-client` and for `osascript`.
+
 ## Digit 7 flow
 
 With `OPERATOR_MEET_JOIN_TARGET=desktop`:

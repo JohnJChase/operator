@@ -136,7 +136,7 @@ def _handle_sse(
     status = "ok"
     message = ""
     try:
-        _execute_command(payload)
+        message = _execute_command(payload)
     except Exception as e:
         status = "error"
         message = str(e)
@@ -144,18 +144,21 @@ def _handle_sse(
     _ack(base, token, client_id, command_id, status, message)
 
 
-def _execute_command(command: dict[str, Any]) -> None:
+def _execute_command(command: dict[str, Any]) -> str:
     kind = str(command.get("type") or "")
     payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
     if kind == "desktop.open_url":
         url = validate_open_url(str(payload.get("url") or ""))
         _open_url(url)
         print(f"mac-client: opened {url}", flush=True)
-        return
+        return url
     if kind == "desktop.notify":
-        _notify(str(payload.get("title") or "Operator"), str(payload.get("body") or ""))
-        print("mac-client: notified", flush=True)
-        return
+        title = str(payload.get("title") or "Operator")
+        body = str(payload.get("body") or "")
+        _notify(title, body)
+        summary = _notification_summary(title, body)
+        print(f"mac-client: notified: {summary}", flush=True)
+        return summary
     raise ValueError(f"unsupported command: {kind}")
 
 
@@ -167,7 +170,6 @@ def _open_url(url: str) -> None:
 
 def _notify(title: str, body: str) -> None:
     if sys.platform != "darwin":
-        print(f"{title}: {body}", flush=True)
         return
     script = (
         "display notification "
@@ -176,6 +178,14 @@ def _notify(title: str, body: str) -> None:
         f"{_applescript_string((title or 'Operator')[:80])}"
     )
     subprocess.run(["osascript", "-e", script], check=True)
+
+
+def _notification_summary(title: str, body: str) -> str:
+    title = " ".join((title or "Operator").split())[:80]
+    body = " ".join((body or "").split())
+    if len(body) > 180:
+        body = body[:177].rstrip() + "..."
+    return f"{title}: {body}" if body else title
 
 
 def _ack(
