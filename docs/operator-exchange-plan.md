@@ -381,11 +381,16 @@ Acceptance:
 - arbitrary shell execution is impossible by construction
 - one focused test covers each non-trivial request validator
 
-### Phase 4: Mac Companion CLI V2
+### Phase 4: Mac Companion CLI V2 (Complete)
 
 Goal: prove richer Mac station behavior before building a real app. This phase
 does not require a new wire protocol; use the current desktop bridge plus the
 new inbox APIs unless changing protocol is clearly smaller.
+
+Status:
+
+- complete via `mac-status` / `mac-inbox` (desktop token preferred; console
+  password fallback)
 
 Work:
 
@@ -507,9 +512,9 @@ Acceptance:
 
 ## Immediate Next Build
 
-Phase 2 inbox API is complete. Next useful coding increment is Phase 3 (minimal
-allowlisted extension requests) or Phase 4 Mac CLI against the inbox endpoints —
-still without a native Mac app.
+Phases 1–2 (Pi) and 4 (Mac CLI) are merged. Next useful Pi coding increment is
+Phase 5 (chart-first outgoing `call.request`). Phase 3 request vocabulary stays
+optional while inbox POSTs cover reply/heard/delete.
 
 ## Non-Goals For Now
 

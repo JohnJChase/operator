@@ -139,6 +139,24 @@ For connection debugging, run the Mac client with keepalive logging:
 OPERATOR_DESKTOP_VERBOSE=1 just mac-client
 ```
 
+For Mac-side status and inbox browsing (same `OPERATOR_DESKTOP_TOKEN` as the
+listener; console password still works as a fallback):
+
+```bash
+export OPERATOR_DESKTOP_TOKEN=replace-with-the-same-token
+just mac-status
+just mac-inbox
+```
+
+To play a voicemail from the Mac:
+
+```bash
+just mac-inbox --play-vm 3
+```
+
+`mac-inbox` uses `/api/inbox` with the desktop token (or console session).
+Resolve voicemail audio as `{OPERATOR_PI_URL}{audio_url}`.
+
 If the WE302 double-rings but the Mac client logs no `notified:` line, check the
 Pi log. New SMS delivery attempts log either:
 
@@ -209,7 +227,6 @@ Resolve audio as `{OPERATOR_PI_URL}{audio_url}`. Do not Funnel these routes.
 
 Good next increments:
 
-- Phase 3/4: Mac CLI or allowlisted requests against this inbox API.
 - Phase 5: Mac "call this contact" request that rings the WE302 first, then
   places the call after pickup.
 - Phase 6: tiny SwiftUI menu bar wrapper around the same exchange protocol.

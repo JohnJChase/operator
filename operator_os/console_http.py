@@ -178,7 +178,7 @@ class ConsoleHttpServer:
                     self._ok_json({"digits": digit_menu_tree()})
                     return
                 if path == "/api/status":
-                    if not self._require_auth():
+                    if not self._require_inbox_auth():
                         return
                     self._ok_json(hub.status())
                     return

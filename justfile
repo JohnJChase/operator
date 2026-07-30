@@ -140,6 +140,12 @@ refresh *args:
 mac-client *args:
     uv run operator-os mac-client {{args}}
 
+mac-status *args:
+    uv run operator-os mac-status {{args}}
+
+mac-inbox *args:
+    uv run operator-os mac-inbox {{args}}
+
 lint:
     uv run ruff check .
 
