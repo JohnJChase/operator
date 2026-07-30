@@ -98,6 +98,60 @@ def test_plant_apply_state_without_live_audio():
     assert "hangup" in audio.ops
 
 
+def test_outside_line_pulse_stops_tone_and_stays_silent():
+    class _FakeAudio:
+        def __init__(self):
+            self.ops: list[str] = []
+
+        def stop(self):
+            self.ops.append("stop")
+
+        def notify_hangup(self):
+            self.ops.append("hangup")
+
+        def set_hook(self, off):
+            self.ops.append(f"hook={off}")
+
+        def play_tone(self, *a, **k):
+            self.ops.append("tone")
+
+        def play_stutter_dial(self, *a, **k):
+            self.ops.append("stutter")
+
+        def play_stream(self, *a, **k):
+            pass
+
+        def play_file(self, *a, **k):
+            pass
+
+        def speak(self, *a, **k):
+            pass
+
+        def play_plant(self, *a, **k):
+            pass
+
+    class _FakeBridge:
+        active = False
+        handset_alsa = "null"
+
+        def start(self):
+            self.active = True
+
+        def stop(self):
+            self.active = False
+
+    audio = _FakeAudio()
+    plant = Plant(audio=audio, bridge=_FakeBridge(), live=True)
+    plant.context.off_hook = True
+    plant.apply_state(State.OUTSIDE_LINE)
+    assert audio.ops.count("tone") == 1
+    audio.ops.clear()
+    # Pulse / digit re-apply same state — must cut tone, not restart it.
+    plant.apply_state(State.OUTSIDE_LINE)
+    assert "stop" in audio.ops
+    assert "tone" not in audio.ops
+
+
 def test_plant_outbound_handset_mode_skips_bridge():
     class _FakeAudio:
         def stop(self):

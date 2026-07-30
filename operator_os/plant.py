@@ -150,6 +150,18 @@ class Plant:
                 self.audio.stop()
                 return
 
+            # Outside seize: dial tone on entry; pulse/digit re-apply must stay silent
+            # (same idea as COLLECTING_DIGIT). Otherwise plant restarts tone forever.
+            if patch.label == "outside":
+                self._drop_line_legs()
+                if prev.label == "outside":
+                    self.audio.stop()
+                    return
+                self.audio.set_hook(True)
+                self.audio.stop()
+                self.audio.play_tone("dial", wait=False)
+                return
+
             if not off_hook and (
                 patch.receiver != ReceiverFeed.NONE or patch.mic != MicFeed.NONE
             ):
