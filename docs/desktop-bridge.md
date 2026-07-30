@@ -4,6 +4,9 @@ The desktop bridge lets a Mac join the Operator exchange as a client. The Mac
 opens an outbound SSE connection to the Pi, so the Pi does not need a hardcoded
 Mac address and the Mac does not need an inbound firewall rule.
 
+For the broader central-office / multi-extension roadmap, see
+[operator-exchange-plan.md](operator-exchange-plan.md).
+
 ```text
 WE302 phone -> Pi operator service -> SSE event -> Mac client -> native macOS action
 Mac client -> POST request -> Pi operator service

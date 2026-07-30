@@ -54,3 +54,4 @@ Leave-it-plugged-in: `docs/systemd.md` + `deploy/operator-os.service`.
 Operator modes (digit 0 menu, digit 8 Realtime, digit 9 SIP): `docs/ai-operator.md`,
 `docs/sip-outside-line.md`.
 Mac companion bridge: `docs/desktop-bridge.md`.
+Central-office / multi-extension roadmap: `docs/operator-exchange-plan.md`.
