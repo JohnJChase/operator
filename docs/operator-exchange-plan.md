@@ -284,10 +284,16 @@ uv run pytest tests/test_desktop_bridge.py tests/test_mac_client.py
 uv run ruff check .
 ```
 
-### Phase 1: Make Routing Policy Explicit In The Current Bridge
+### Phase 1: Make Routing Policy Explicit In The Current Bridge (Complete)
 
 Goal: keep the current Mac bridge working while making routing rules explicit
 enough for multiple clients.
+
+Status:
+
+- complete in current code
+- notifications fan out; Meet/URL opens are unicast with preferred fallback
+- Mac wire protocol unchanged
 
 Work:
 
@@ -318,10 +324,16 @@ uv run pytest tests/test_desktop_bridge.py tests/test_console.py
 uv run ruff check .
 ```
 
-### Phase 2: Inbox Service API
+### Phase 2: Inbox Service API (Complete)
 
 Goal: make inbox and voicemail usable by non-browser clients without duplicating
 console code.
+
+Status:
+
+- complete in current code
+- shared helpers in `operator_os/inbox_api.py`
+- same `/api/inbox*` paths accept console session **or** desktop Bearer token
 
 Work:
 
@@ -495,18 +507,9 @@ Acceptance:
 
 ## Immediate Next Build
 
-The next useful coding increment is revised Phase 1:
-
-1. Keep the current desktop wire protocol unchanged.
-2. Add routing modes inside `DesktopBridge`:
-   - notification fan-out
-   - meeting/URL unicast
-3. Keep current Mac client working unchanged.
-4. Add multi-client tests proving notify fan-out vs meet unicast.
-5. Add skipped-delivery logging for both routing modes if missing.
-
-Do not build the native Mac app yet. First prove the exchange routing model with
-the existing Python client.
+Phase 2 inbox API is complete. Next useful coding increment is Phase 3 (minimal
+allowlisted extension requests) or Phase 4 Mac CLI against the inbox endpoints —
+still without a native Mac app.
 
 ## Non-Goals For Now
 

@@ -45,6 +45,8 @@ console stays off.
 - Play VM WAV in-browser; mark heard; delete.
 - **Reply:** draft in prompt → confirm → `send_sms` (same path as tools).
 - **Call:** queues `place_call` through the chart (handset must be off-hook).
+- Desktop companions may call the same `/api/inbox*` routes with
+  `OPERATOR_DESKTOP_TOKEN` (see [desktop-bridge.md](desktop-bridge.md)).
 
 ### Directory (phonebook)
 

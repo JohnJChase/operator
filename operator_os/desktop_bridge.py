@@ -16,18 +16,31 @@ from urllib.parse import urlparse
 DESKTOP_TTL_S = 45.0
 DESKTOP_COMMAND_TYPES = {"desktop.open_url", "desktop.notify"}
 
+# Product routing keys (wire protocol stays desktop.* / open_url / notify).
+INTENT_OPEN_URL = "open.url"
+INTENT_OPEN_MEETING = "open.meeting"
+INTENT_NOTIFY_MESSAGES = "notify.messages"
+
+_ROUTE_FANOUT = "fanout"
+_ROUTE_UNICAST = "unicast"
+
 
 def desktop_token() -> str:
     return os.environ.get("OPERATOR_DESKTOP_TOKEN", "").strip()
 
 
 def desktop_client_target() -> str:
+    """Preferred client for unicast opens (Meet/URL). Ignored for notify fan-out."""
     return _clean_id(os.environ.get("OPERATOR_DESKTOP_CLIENT_ID", "").strip())
 
 
 def meet_join_target() -> str:
     raw = os.environ.get("OPERATOR_MEET_JOIN_TARGET", "phone").strip().lower()
     return raw if raw in {"phone", "desktop", "auto"} else "phone"
+
+
+def _route_mode_for(command_type: str) -> str:
+    return _ROUTE_FANOUT if command_type == "desktop.notify" else _ROUTE_UNICAST
 
 
 def validate_open_url(url: str) -> str:
@@ -199,26 +212,34 @@ class DesktopRegistry:
         payload: dict[str, Any],
         *,
         target_id: str = "",
+        route: str | None = None,
     ) -> dict[str, Any] | None:
         if command_type not in DESKTOP_COMMAND_TYPES:
             raise ValueError(f"unsupported desktop command: {command_type}")
+        mode = route or _route_mode_for(command_type)
+        if mode not in {_ROUTE_FANOUT, _ROUTE_UNICAST}:
+            raise ValueError(f"unsupported route mode: {mode}")
         clean_payload = dict(payload)
         if command_type == "desktop.open_url":
             clean_payload["url"] = validate_open_url(str(clean_payload.get("url") or ""))
         cap = _capability_for(command_type)
-        targets = self._target_clients(capability=cap, target_id=target_id)
+        targets = self._select_targets(capability=cap, target_id=target_id, mode=mode)
         if not targets:
             return None
-        cmd = {
-            "id": secrets.token_urlsafe(12),
-            "type": command_type,
-            "payload": clean_payload,
-            "created_at": time.time(),
-        }
+        created_at = time.time()
+        first: dict[str, Any] | None = None
         for cid in targets:
+            cmd = {
+                "id": secrets.token_urlsafe(12),
+                "type": command_type,
+                "payload": clean_payload,
+                "created_at": created_at,
+            }
             q = self._queues.setdefault(cid, queue.Queue(maxsize=100))
             _put_drop_oldest(q, cmd)
-        return dict(cmd)
+            if first is None:
+                first = dict(cmd)
+        return first
 
     def next_command(self, client_id: str, *, timeout_s: float = 15.0) -> dict[str, Any] | None:
         cid = _clean_id(client_id)
@@ -251,20 +272,38 @@ class DesktopRegistry:
                 },
             )
 
-    def _target_clients(self, *, capability: str, target_id: str = "") -> list[str]:
+    def _online_capable(self, *, capability: str) -> list[str]:
+        """Capable online clients, sorted by client_id for stable unicast fallback."""
         now = time.monotonic()
         out: list[str] = []
-        tid = _clean_id(target_id)
         with self._lock:
             for client in self._clients.values():
-                if tid and client.client_id != tid:
-                    continue
                 if capability not in client.capabilities:
                     continue
                 if not client.connected or (now - client.last_seen) > DESKTOP_TTL_S:
                     continue
                 out.append(client.client_id)
+        out.sort()
         return out
+
+    def _select_targets(
+        self, *, capability: str, target_id: str = "", mode: str = _ROUTE_UNICAST
+    ) -> list[str]:
+        online = self._online_capable(capability=capability)
+        if not online:
+            return []
+        tid = _clean_id(target_id)
+        if mode == _ROUTE_FANOUT:
+            if tid:
+                return [tid] if tid in online else []
+            return online
+        # Unicast: preferred if online, else first capable online (sorted id).
+        if tid and tid in online:
+            return [tid]
+        if tid:
+            # Preferred set but offline/missing — fall through to first online.
+            return [online[0]]
+        return [online[0]]
 
     def _require_client(self, client_id: str) -> DesktopClient:
         client = self._clients.get(client_id)
@@ -346,9 +385,10 @@ class DesktopBridge:
         return "; ".join(parts)
 
     def has_client(self, *, capability: str | None = None, target_id: str = "") -> bool:
+        """True if any capable online client exists (preferred is delivery-only)."""
         return self.registry.has_online_client(
             capability=capability,
-            target_id=target_id or desktop_client_target(),
+            target_id=_clean_id(target_id),
         )
 
     def open_url(self, *, url: str, title: str = "", target_id: str = "") -> DesktopDelivery:
@@ -362,7 +402,11 @@ class DesktopBridge:
         url = meet_video_url(meeting)
         if not url:
             return DesktopDelivery(False, reason="no_meet_url")
-        return self.open_url(url=url, title=meeting_title(meeting), target_id=target_id)
+        return self._queue(
+            "desktop.open_url",
+            {"url": url, "title": meeting_title(meeting)},
+            target_id=target_id,
+        )
 
     def notify(
         self,
@@ -410,11 +454,19 @@ class DesktopBridge:
         *,
         target_id: str = "",
     ) -> DesktopDelivery:
+        mode = _route_mode_for(command_type)
+        # Notify fan-out ignores OPERATOR_DESKTOP_CLIENT_ID; only an explicit
+        # target_id (diagnostics) narrows delivery. Unicast opens use preferred.
+        if mode == _ROUTE_UNICAST:
+            effective_target = _clean_id(target_id) or desktop_client_target()
+        else:
+            effective_target = _clean_id(target_id)
         try:
             cmd = self.registry.queue_command(
                 command_type,
                 payload,
-                target_id=target_id or desktop_client_target(),
+                target_id=effective_target,
+                route=mode,
             )
         except ValueError as e:
             return DesktopDelivery(False, reason=str(e))

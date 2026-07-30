@@ -45,10 +45,13 @@ Feature code should not build raw `desktop.*` payloads. Add a named method to
 `DesktopBridge` first, add one small test, then call that method from the
 feature path.
 
-Current Rev A routing is transitional. The bridge may enqueue a command to every
-online client with the matching capability. The exchange roadmap Phase 1 will
-split this deliberately: message notifications fan out, while meeting/URL opens
-route to one preferred capable client.
+Routing modes (Phase 1):
+
+- `desktop.notify` (SMS / message alerts): fan out to every online client with
+  the `notify` capability. `OPERATOR_DESKTOP_CLIENT_ID` does not restrict this.
+- `desktop.open_url` / Meet opens: unicast to `OPERATOR_DESKTOP_CLIENT_ID` when
+  that client is online and capable; otherwise the first capable online client
+  (stable order by `client_id`).
 
 ## Pi setup
 
@@ -77,13 +80,14 @@ PSTN path when SIP is configured:
 OPERATOR_MEET_JOIN_TARGET=auto
 ```
 
-Optional targeting:
+Optional preferred client for Meet/URL opens only:
 
 ```bash
 OPERATOR_DESKTOP_CLIENT_ID=john-macbook
 ```
 
-Blank means "first online client with the needed capability."
+Blank means "first online client with `open_url`" for opens. Notifications still
+fan out to every online `notify` client.
 
 ## Mac setup
 
@@ -148,9 +152,9 @@ or:
 desktop: sms notify skipped id=42 no_client; clients=macbook:offline:open_url,notify
 ```
 
-That skipped line usually means the Mac client id does not match
-`OPERATOR_DESKTOP_CLIENT_ID`, the Mac client is not connected, or the Mac did not
-register the `notify` capability.
+That skipped line usually means no Mac client is connected with the `notify`
+capability (or the SSE session dropped). Preferred Meet client id does not
+affect SMS notify fan-out.
 
 ## Digit 7 flow
 
@@ -175,6 +179,24 @@ If a Mac client is connected with the `notify` capability, the Pi also pushes a
 `desktop.notify` command with the sender and message preview. The Mac shows a
 native notification and acknowledges the command back to the Pi.
 
+## Inbox API (desktop token)
+
+Mac companions may use the same inbox routes as the browser console. Auth is
+either the console session cookie **or** `Authorization: Bearer
+$OPERATOR_DESKTOP_TOKEN` (or `X-Operator-Desktop-Token`).
+
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/api/inbox` | `{sms, voicemails, waiting}` |
+| GET | `/api/inbox/vm/{id}/audio` | `audio/wav`; `audio_url` in list is relative |
+| POST | `/api/inbox/sms/heard` | `{"id": N}` |
+| POST | `/api/inbox/sms/delete` | `{"id": N}` |
+| POST | `/api/inbox/sms/reply` | `{"id": N, "text": "...", "confirm": true}` |
+| POST | `/api/inbox/vm/heard` | `{"id": N}` |
+| POST | `/api/inbox/vm/delete` | `{"id": N}` |
+
+Resolve audio as `{OPERATOR_PI_URL}{audio_url}`. Do not Funnel these routes.
+
 ## Security rules
 
 - Use a long random `OPERATOR_DESKTOP_TOKEN`.
@@ -187,8 +209,7 @@ native notification and acknowledges the command back to the Pi.
 
 Good next increments:
 
-- Phase 1: explicit fan-out vs unicast routing in `DesktopBridge`.
-- Phase 2: Mac inbox window backed by the Pi inbox API.
+- Phase 3/4: Mac CLI or allowlisted requests against this inbox API.
 - Phase 5: Mac "call this contact" request that rings the WE302 first, then
   places the call after pickup.
 - Phase 6: tiny SwiftUI menu bar wrapper around the same exchange protocol.

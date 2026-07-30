@@ -24,10 +24,9 @@ from operator_os.desktop_bridge import (
     desktop_client_target,
     desktop_token,
 )
+from operator_os import inbox_api
 
 STATIC_DIR = Path(__file__).resolve().parent / "console_static"
-ROOT = Path(__file__).resolve().parents[1]
-VM_DIR = (ROOT / "data" / "voicemail").resolve()
 
 
 class ConsoleHttpServer:
@@ -87,6 +86,27 @@ class ConsoleHttpServer:
                 if not got:
                     got = (self.headers.get("X-Operator-Desktop-Token") or "").strip()
                 if hmac.compare_digest(got.encode(), expected.encode()):
+                    return True
+                self._err(401, "unauthorized")
+                return False
+
+            def _desktop_token_ok(self) -> bool:
+                expected = desktop_token()
+                if not expected:
+                    return False
+                auth = (self.headers.get("Authorization") or "").strip()
+                got = ""
+                if auth.lower().startswith("bearer "):
+                    got = auth[7:].strip()
+                if not got:
+                    got = (self.headers.get("X-Operator-Desktop-Token") or "").strip()
+                if not got:
+                    return False
+                return hmac.compare_digest(got.encode(), expected.encode())
+
+            def _require_inbox_auth(self) -> bool:
+                """Console session or desktop token (Mac companion)."""
+                if hub.authed(self._token()) or self._desktop_token_ok():
                     return True
                 self._err(401, "unauthorized")
                 return False
@@ -175,12 +195,12 @@ class ConsoleHttpServer:
                     self._ok_json({"clients": hub.desktop.clients()})
                     return
                 if path == "/api/inbox":
-                    if not self._require_auth():
+                    if not self._require_inbox_auth():
                         return
-                    self._ok_json(_inbox_payload())
+                    self._ok_json(inbox_api.build_inbox_payload())
                     return
                 if path.startswith("/api/inbox/vm/") and path.endswith("/audio"):
-                    if not self._require_auth():
+                    if not self._require_inbox_auth():
                         return
                     mid = path[len("/api/inbox/vm/") : -len("/audio")].strip("/")
                     if not mid.isdigit():
@@ -233,15 +253,9 @@ class ConsoleHttpServer:
                     hub.disconnect_desktop_client(client_id)
 
             def _serve_vm_audio(self, vm_id: int) -> None:
-                from operator_os import db as store
-
-                vm = store.get_voicemail(vm_id)
-                if vm is None:
+                path = inbox_api.resolve_vm_audio_path(vm_id)
+                if path is None:
                     self._err(404, "not found")
-                    return
-                path = Path(vm.path).resolve()
-                if not str(path).startswith(str(VM_DIR)) or not path.is_file():
-                    self._err(404, "audio missing")
                     return
                 self._serve_bytes(path.read_bytes(), "audio/wav")
 
@@ -323,6 +337,11 @@ class ConsoleHttpServer:
                     self.end_headers()
                     self.wfile.write(body)
                     return
+                if path.startswith("/api/inbox/"):
+                    if not self._require_inbox_auth():
+                        return
+                    self._handle_inbox_post(path)
+                    return
                 if not self._require_auth():
                     return
                 if path == "/api/ring-test":
@@ -369,44 +388,16 @@ class ConsoleHttpServer:
                     return
                 if path == "/api/desktop/notify":
                     data = self._read_json()
+                    # Empty client_id → fan-out; do not apply preferred meet target.
                     delivery = hub.request_desktop_notify(
                         title=str(data.get("title") or "Operator"),
                         body=str(data.get("body") or ""),
-                        target_id=str(data.get("client_id") or desktop_client_target()),
+                        target_id=str(data.get("client_id") or ""),
                     )
                     if not delivery.ok:
                         self._err(409, delivery.reason or "no desktop client online")
                         return
                     self._ok_json({"ok": True, "command": delivery.command})
-                    return
-                if path == "/api/inbox/sms/heard":
-                    data = self._read_json()
-                    from operator_os import db as store
-
-                    m = store.mark_heard(int(data.get("id") or 0))
-                    self._ok_json({"ok": m is not None})
-                    return
-                if path == "/api/inbox/sms/delete":
-                    data = self._read_json()
-                    from operator_os import db as store
-
-                    self._ok_json({"ok": store.delete_message(int(data.get("id") or 0))})
-                    return
-                if path == "/api/inbox/sms/reply":
-                    self._sms_reply(self._read_json())
-                    return
-                if path == "/api/inbox/vm/heard":
-                    data = self._read_json()
-                    from operator_os import db as store
-
-                    m = store.mark_voicemail_heard(int(data.get("id") or 0))
-                    self._ok_json({"ok": m is not None})
-                    return
-                if path == "/api/inbox/vm/delete":
-                    data = self._read_json()
-                    from operator_os import db as store
-
-                    self._ok_json({"ok": store.delete_voicemail(int(data.get("id") or 0))})
                     return
                 if path == "/api/phonebook":
                     data = self._read_json()
@@ -444,45 +435,38 @@ class ConsoleHttpServer:
                     return
                 self._err(404, "not found")
 
-            def _sms_reply(self, data: dict[str, Any]) -> None:
-                from operator_os import db as store
-                from operator_os.sip import normalize_nanp
-                from operator_os.sms import send_sms, sms_configured, sms_from
-
-                if not data.get("confirm"):
-                    self._err(400, "confirm required")
+            def _handle_inbox_post(self, path: str) -> None:
+                if path == "/api/inbox/sms/heard":
+                    data = self._read_json()
+                    self._ok_json({"ok": inbox_api.mark_sms_heard(int(data.get("id") or 0))})
                     return
-                if not sms_configured():
-                    self._err(503, "sms not configured")
+                if path == "/api/inbox/sms/delete":
+                    data = self._read_json()
+                    self._ok_json({"ok": inbox_api.delete_sms(int(data.get("id") or 0))})
                     return
-                to = str(data.get("to") or "").strip()
-                mid = data.get("id")
-                if mid is not None and not to:
-                    msg = store.get_message(int(mid))
-                    if msg is None:
-                        self._err(404, "message not found")
+                if path == "/api/inbox/sms/reply":
+                    data = self._read_json()
+                    mid = data.get("id")
+                    result = inbox_api.reply_sms(
+                        confirm=bool(data.get("confirm")),
+                        text=str(data.get("text") or ""),
+                        to=str(data.get("to") or ""),
+                        message_id=int(mid) if mid is not None else None,
+                    )
+                    if not result.ok:
+                        self._err(result.code, result.error)
                         return
-                    to = msg.from_e164
-                dest = normalize_nanp(to)
-                if not dest:
-                    self._err(400, "invalid to")
+                    self._ok_json({"ok": True, "to": result.to})
                     return
-                text = str(data.get("text") or "").strip()
-                if not text or len(text) > 500:
-                    self._err(400, "text required (1–500 chars)")
+                if path == "/api/inbox/vm/heard":
+                    data = self._read_json()
+                    self._ok_json({"ok": inbox_api.mark_vm_heard(int(data.get("id") or 0))})
                     return
-                try:
-                    sent = send_sms(to=dest, text=text)
-                except Exception as e:
-                    self._err(502, str(e))
+                if path == "/api/inbox/vm/delete":
+                    data = self._read_json()
+                    self._ok_json({"ok": inbox_api.delete_vm(int(data.get("id") or 0))})
                     return
-                store.insert_outbound(
-                    to_e164=sent.to_e164,
-                    from_e164=sent.from_e164 or sms_from() or "",
-                    body=sent.body,
-                    telnyx_id=sent.telnyx_id,
-                )
-                self._ok_json({"ok": True, "to": dest})
+                self._err(404, "not found")
 
         self._httpd = ThreadingHTTPServer((self.host, self.port), Handler)
         self._httpd.daemon_threads = True
@@ -496,44 +480,3 @@ class ConsoleHttpServer:
             self._httpd = None
         self._thread = None
 
-
-def _inbox_payload() -> dict[str, Any]:
-    from operator_os import db as store
-    from operator_os.phonebook import display_name
-
-    store.init_db()
-    sms = []
-    for m in store.list_messages(limit=40):
-        sms.append(
-            {
-                "id": m.id,
-                "direction": m.direction,
-                "from_e164": m.from_e164,
-                "to_e164": m.to_e164,
-                "from_name": display_name(m.from_e164) if m.direction == "in" else None,
-                "to_name": display_name(m.to_e164) if m.direction == "out" else None,
-                "body": m.body,
-                "created_at": m.created_at,
-                "heard_at": m.heard_at,
-                "status": m.status,
-            }
-        )
-    vms = []
-    for vm in store.list_voicemails(limit=40):
-        vms.append(
-            {
-                "id": vm.id,
-                "from_e164": vm.from_e164,
-                "from_name": display_name(vm.from_e164),
-                "created_at": vm.created_at,
-                "heard_at": vm.heard_at,
-                "duration_s": vm.duration_s,
-                "status": vm.status,
-                "audio_url": f"/api/inbox/vm/{vm.id}/audio",
-            }
-        )
-    return {
-        "sms": sms,
-        "voicemails": vms,
-        "waiting": store.waiting_count(),
-    }

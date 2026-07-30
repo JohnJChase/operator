@@ -113,6 +113,80 @@ def test_desktop_bridge_client_summary():
     assert bridge.client_summary() == "macbook:online:open_url,notify"
 
 
+def test_notify_fans_out_ignoring_preferred_client(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OPERATOR_DESKTOP_CLIENT_ID", "mac-a")
+    bridge = DesktopBridge()
+    for cid in ("mac-b", "mac-a"):
+        bridge.register_client(cid, cid, ["open_url", "notify"])
+        bridge.connect_client(cid)
+
+    delivery = bridge.notify_inbound_sms(
+        message_id=1,
+        from_e164="+15551234567",
+        from_name="Alice",
+        body="hello",
+    )
+    assert delivery.ok
+    cmd_a = bridge.next_command("mac-a", timeout_s=0.01)
+    cmd_b = bridge.next_command("mac-b", timeout_s=0.01)
+    assert cmd_a is not None and cmd_b is not None
+    assert cmd_a["type"] == "desktop.notify"
+    assert cmd_b["type"] == "desktop.notify"
+    assert cmd_a["payload"]["title"] == "Message from Alice"
+    assert cmd_a["id"] != cmd_b["id"]
+    assert bridge.next_command("mac-a", timeout_s=0.01) is None
+
+
+def test_open_url_unicast_to_preferred_when_online(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OPERATOR_DESKTOP_CLIENT_ID", "mac-b")
+    bridge = DesktopBridge()
+    for cid in ("mac-a", "mac-b"):
+        bridge.register_client(cid, cid, ["open_url", "notify"])
+        bridge.connect_client(cid)
+
+    delivery = bridge.open_url(url="https://meet.google.com/abc-defg-hij")
+    assert delivery.ok
+    assert bridge.next_command("mac-b", timeout_s=0.01) == delivery.command
+    assert bridge.next_command("mac-a", timeout_s=0.01) is None
+
+
+def test_open_url_falls_back_to_first_online_when_preferred_offline(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("OPERATOR_DESKTOP_CLIENT_ID", "mac-offline")
+    bridge = DesktopBridge()
+    bridge.register_client("mac-offline", "Offline", ["open_url"])
+    # registered but not connected
+    for cid in ("mac-z", "mac-a"):
+        bridge.register_client(cid, cid, ["open_url"])
+        bridge.connect_client(cid)
+
+    delivery = bridge.open_url(url="https://example.com/meet")
+    assert delivery.ok
+    # Stable fallback: lowest client_id among online capable.
+    assert bridge.next_command("mac-a", timeout_s=0.01) == delivery.command
+    assert bridge.next_command("mac-z", timeout_s=0.01) is None
+    assert bridge.next_command("mac-offline", timeout_s=0.01) is None
+
+
+def test_open_meeting_unicast_not_fanout(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("OPERATOR_DESKTOP_CLIENT_ID", raising=False)
+    bridge = DesktopBridge()
+    for cid in ("mac-b", "mac-a"):
+        bridge.register_client(cid, cid, ["open_url", "notify"])
+        bridge.connect_client(cid)
+
+    meet = MeetDialIn(
+        title="Standup",
+        e164="+15550100999",
+        conference_id="abc-defg-hij",
+    )
+    delivery = bridge.open_meeting(meet)
+    assert delivery.ok
+    assert bridge.next_command("mac-a", timeout_s=0.01) == delivery.command
+    assert bridge.next_command("mac-b", timeout_s=0.01) is None
+
+
 def test_sms_notification_payload_prefers_contact_name_and_truncates():
     payload = sms_notification_payload(
         message_id=42,
