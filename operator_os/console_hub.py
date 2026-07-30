@@ -95,6 +95,9 @@ class ConsoleHub:
     def has_desktop_client(self, *, capability: str | None = None) -> bool:
         return self.desktop.has_client(capability=capability)
 
+    def desktop_client_summary(self) -> str:
+        return self.desktop.client_summary()
+
     def register_desktop_client(
         self, client_id: str, name: str, capabilities: list[str]
     ) -> dict[str, Any]:

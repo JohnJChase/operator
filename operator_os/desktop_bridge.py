@@ -334,6 +334,17 @@ class DesktopBridge:
     def clients(self) -> list[dict[str, Any]]:
         return self.registry.clients()
 
+    def client_summary(self) -> str:
+        clients = self.clients()
+        if not clients:
+            return "none"
+        parts = []
+        for client in clients:
+            state = "online" if client.get("online") else "offline"
+            caps = ",".join(client.get("capabilities") or []) or "-"
+            parts.append(f"{client.get('client_id')}:{state}:{caps}")
+        return "; ".join(parts)
+
     def has_client(self, *, capability: str | None = None, target_id: str = "") -> bool:
         return self.registry.has_online_client(
             capability=capability,

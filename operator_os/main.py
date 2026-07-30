@@ -834,10 +834,16 @@ def run_loop(
         delivery = console_hub.request_desktop_open_meeting(meet)
         if not delivery.ok and delivery.reason == "no_meet_url":
             audio.speak("That meeting does not have a desktop link.", wait=False)
+            _status("desktop: open meet skipped reason=no_meet_url")
             expect_service_done = True
             return False
         if not delivery.ok:
             audio.speak("Your Mac is not connected.", wait=False)
+            _status(
+                "desktop: open meet skipped "
+                f"reason={delivery.reason or 'unknown'} "
+                f"clients={console_hub.desktop_client_summary()}"
+            )
             expect_service_done = True
             return False
         audio.speak(f"Opening {title} on your Mac.", wait=wait)
@@ -911,6 +917,13 @@ def run_loop(
         if delivery.ok:
             events.emit("desktop", value="sms_notify", digit=message_id)
             _status(f"desktop: sms notify id={message_id}")
+        else:
+            detail = (
+                f"{delivery.reason or 'unknown'}; "
+                f"clients={console_hub.desktop_client_summary()}"
+            )
+            events.emit("desktop", value="sms_notify_skipped", digit=message_id, detail=detail)
+            _status(f"desktop: sms notify skipped id={message_id} {detail}")
 
     def _queue_sms_alert(message_id: int) -> None:
         nonlocal sms_alert_id

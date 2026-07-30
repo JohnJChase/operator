@@ -45,6 +45,12 @@ def run_mac_client(argv: list[str] | None = None) -> int:
         default=os.environ.get("OPERATOR_DESKTOP_NAME", f"{socket.gethostname()} Mac"),
         help="display name shown by the Pi",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=_truthy(os.environ.get("OPERATOR_DESKTOP_VERBOSE", "")),
+        help="log SSE keepalives while waiting for commands",
+    )
     parser.add_argument("--once", action="store_true", help="connect once; do not retry")
     args = parser.parse_args(argv)
 
@@ -55,7 +61,7 @@ def run_mac_client(argv: list[str] | None = None) -> int:
     while True:
         try:
             _register(base, args.token, args.client_id, args.name)
-            _event_loop(base, args.token, args.client_id)
+            _event_loop(base, args.token, args.client_id, verbose=args.verbose)
         except KeyboardInterrupt:
             print("mac-client: quit")
             return 0
@@ -82,7 +88,7 @@ def _register(base: str, token: str, client_id: str, name: str) -> None:
     )
 
 
-def _event_loop(base: str, token: str, client_id: str) -> None:
+def _event_loop(base: str, token: str, client_id: str, *, verbose: bool = False) -> None:
     qs = urlencode({"client_id": client_id})
     req = urllib.request.Request(
         f"{base}/api/desktop/events?{qs}",
@@ -96,6 +102,7 @@ def _event_loop(base: str, token: str, client_id: str) -> None:
         print("mac-client: listening", flush=True)
         event = ""
         data_lines: list[str] = []
+        last_keepalive_log = 0.0
         while True:
             raw = resp.readline()
             if raw == b"":
@@ -107,6 +114,9 @@ def _event_loop(base: str, token: str, client_id: str) -> None:
                 data_lines = []
                 continue
             if line.startswith(":"):
+                if verbose and time.monotonic() - last_keepalive_log >= 55.0:
+                    print(f"mac-client: keepalive from {base} as {client_id}", flush=True)
+                    last_keepalive_log = time.monotonic()
                 continue
             if line.startswith("event:"):
                 event = line[len("event:") :].strip()
@@ -186,6 +196,10 @@ def _notification_summary(title: str, body: str) -> str:
     if len(body) > 180:
         body = body[:177].rstrip() + "..."
     return f"{title}: {body}" if body else title
+
+
+def _truthy(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _ack(

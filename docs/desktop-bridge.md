@@ -111,6 +111,29 @@ If that line appears but no macOS banner appears, the bridge worked and macOS
 hid the notification. Check Focus / Do Not Disturb and notification permissions
 for the terminal app running `just mac-client` and for `osascript`.
 
+For connection debugging, run the Mac client with keepalive logging:
+
+```bash
+OPERATOR_DESKTOP_VERBOSE=1 just mac-client
+```
+
+If the WE302 double-rings but the Mac client logs no `notified:` line, check the
+Pi log. New SMS delivery attempts log either:
+
+```text
+desktop: sms notify id=42
+```
+
+or:
+
+```text
+desktop: sms notify skipped id=42 no_client; clients=macbook:offline:open_url,notify
+```
+
+That skipped line usually means the Mac client id does not match
+`OPERATOR_DESKTOP_CLIENT_ID`, the Mac client is not connected, or the Mac did not
+register the `notify` capability.
+
 ## Digit 7 flow
 
 With `OPERATOR_MEET_JOIN_TARGET=desktop`:

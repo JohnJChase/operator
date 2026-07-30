@@ -102,6 +102,15 @@ def test_desktop_bridge_reports_no_client_for_intent():
     delivery = bridge.notify(title="Operator", body="hello")
     assert not delivery.ok
     assert delivery.reason == "no_client"
+    assert bridge.client_summary() == "none"
+
+
+def test_desktop_bridge_client_summary():
+    bridge = DesktopBridge()
+    client = bridge.register_client("macbook", "MacBook", ["open_url", "notify"])
+    assert bridge.client_summary() == "macbook:offline:open_url,notify"
+    bridge.connect_client(client["client_id"])
+    assert bridge.client_summary() == "macbook:online:open_url,notify"
 
 
 def test_sms_notification_payload_prefers_contact_name_and_truncates():

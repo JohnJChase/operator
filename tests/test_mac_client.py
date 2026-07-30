@@ -1,6 +1,6 @@
 """Mac companion client behavior that does not require macOS UI."""
 
-from operator_os.mac_client import _notification_summary
+from operator_os.mac_client import _notification_summary, _truthy
 
 
 def test_notification_summary_includes_title_and_body():
@@ -14,3 +14,11 @@ def test_notification_summary_truncates_body():
     assert summary.startswith("Operator: hello")
     assert len(summary) <= len("Operator: ") + 180
     assert summary.endswith("...")
+
+
+def test_truthy():
+    assert _truthy("1")
+    assert _truthy("true")
+    assert _truthy("YES")
+    assert not _truthy("")
+    assert not _truthy("0")
