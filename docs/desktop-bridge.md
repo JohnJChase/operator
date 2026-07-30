@@ -104,12 +104,22 @@ mac-client: stream ready
 Notification commands log their visible content:
 
 ```text
-mac-client: notified: Message from Alice: Running ten minutes late.
+mac-client: notified (notification): Message from Alice: Running ten minutes late.
 ```
 
 If that line appears but no macOS banner appears, the bridge worked and macOS
 hid the notification. Check Focus / Do Not Disturb and notification permissions
 for the terminal app running `just mac-client` and for `osascript`.
+
+For a guaranteed visible fallback, run the Mac client in alert mode:
+
+```bash
+OPERATOR_DESKTOP_NOTIFY_MODE=alert just mac-client
+```
+
+Alert mode uses a small AppleScript dialog that times out automatically. Use
+`OPERATOR_DESKTOP_NOTIFY_MODE=both` to try Notification Center first and also
+show the alert.
 
 For connection debugging, run the Mac client with keepalive logging:
 

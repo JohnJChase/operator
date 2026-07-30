@@ -51,6 +51,12 @@ def run_mac_client(argv: list[str] | None = None) -> int:
         default=_truthy(os.environ.get("OPERATOR_DESKTOP_VERBOSE", "")),
         help="log SSE keepalives while waiting for commands",
     )
+    parser.add_argument(
+        "--notify-mode",
+        choices=("notification", "alert", "both"),
+        default=_notify_mode(os.environ.get("OPERATOR_DESKTOP_NOTIFY_MODE", "")),
+        help="macOS presentation: notification banner, visible alert, or both",
+    )
     parser.add_argument("--once", action="store_true", help="connect once; do not retry")
     args = parser.parse_args(argv)
 
@@ -61,7 +67,13 @@ def run_mac_client(argv: list[str] | None = None) -> int:
     while True:
         try:
             _register(base, args.token, args.client_id, args.name)
-            _event_loop(base, args.token, args.client_id, verbose=args.verbose)
+            _event_loop(
+                base,
+                args.token,
+                args.client_id,
+                verbose=args.verbose,
+                notify_mode=args.notify_mode,
+            )
         except KeyboardInterrupt:
             print("mac-client: quit")
             return 0
@@ -88,7 +100,14 @@ def _register(base: str, token: str, client_id: str, name: str) -> None:
     )
 
 
-def _event_loop(base: str, token: str, client_id: str, *, verbose: bool = False) -> None:
+def _event_loop(
+    base: str,
+    token: str,
+    client_id: str,
+    *,
+    verbose: bool = False,
+    notify_mode: str = "notification",
+) -> None:
     qs = urlencode({"client_id": client_id})
     req = urllib.request.Request(
         f"{base}/api/desktop/events?{qs}",
@@ -109,7 +128,7 @@ def _event_loop(base: str, token: str, client_id: str, *, verbose: bool = False)
                 raise RuntimeError("SSE stream ended")
             line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
             if not line:
-                _handle_sse(base, token, client_id, event, data_lines)
+                _handle_sse(base, token, client_id, event, data_lines, notify_mode=notify_mode)
                 event = ""
                 data_lines = []
                 continue
@@ -130,6 +149,8 @@ def _handle_sse(
     client_id: str,
     event: str,
     data_lines: list[str],
+    *,
+    notify_mode: str = "notification",
 ) -> None:
     if not data_lines:
         return
@@ -146,7 +167,7 @@ def _handle_sse(
     status = "ok"
     message = ""
     try:
-        message = _execute_command(payload)
+        message = _execute_command(payload, notify_mode=notify_mode)
     except Exception as e:
         status = "error"
         message = str(e)
@@ -154,7 +175,7 @@ def _handle_sse(
     _ack(base, token, client_id, command_id, status, message)
 
 
-def _execute_command(command: dict[str, Any]) -> str:
+def _execute_command(command: dict[str, Any], *, notify_mode: str = "notification") -> str:
     kind = str(command.get("type") or "")
     payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
     if kind == "desktop.open_url":
@@ -165,9 +186,9 @@ def _execute_command(command: dict[str, Any]) -> str:
     if kind == "desktop.notify":
         title = str(payload.get("title") or "Operator")
         body = str(payload.get("body") or "")
-        _notify(title, body)
+        _notify(title, body, mode=notify_mode)
         summary = _notification_summary(title, body)
-        print(f"mac-client: notified: {summary}", flush=True)
+        print(f"mac-client: notified ({notify_mode}): {summary}", flush=True)
         return summary
     raise ValueError(f"unsupported command: {kind}")
 
@@ -178,16 +199,27 @@ def _open_url(url: str) -> None:
     subprocess.run(["open", url], check=True)
 
 
-def _notify(title: str, body: str) -> None:
+def _notify(title: str, body: str, *, mode: str = "notification") -> None:
     if sys.platform != "darwin":
         return
-    script = (
-        "display notification "
-        f"{_applescript_string(body[:240])} "
-        "with title "
-        f"{_applescript_string((title or 'Operator')[:80])}"
-    )
-    subprocess.run(["osascript", "-e", script], check=True)
+    mode = _notify_mode(mode)
+    if mode in ("notification", "both"):
+        script = (
+            "display notification "
+            f"{_applescript_string(body[:240])} "
+            "with title "
+            f"{_applescript_string((title or 'Operator')[:80])}"
+        )
+        subprocess.run(["osascript", "-e", script], check=True)
+    if mode in ("alert", "both"):
+        script = (
+            "display alert "
+            f"{_applescript_string((title or 'Operator')[:80])} "
+            "message "
+            f"{_applescript_string(body[:240])} "
+            "as informational giving up after 8"
+        )
+        subprocess.run(["osascript", "-e", script], check=True)
 
 
 def _notification_summary(title: str, body: str) -> str:
@@ -200,6 +232,11 @@ def _notification_summary(title: str, body: str) -> str:
 
 def _truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _notify_mode(value: str) -> str:
+    mode = value.strip().lower()
+    return mode if mode in {"notification", "alert", "both"} else "notification"
 
 
 def _ack(

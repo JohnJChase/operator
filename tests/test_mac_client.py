@@ -1,6 +1,6 @@
 """Mac companion client behavior that does not require macOS UI."""
 
-from operator_os.mac_client import _notification_summary, _truthy
+from operator_os.mac_client import _notification_summary, _notify_mode, _truthy
 
 
 def test_notification_summary_includes_title_and_body():
@@ -22,3 +22,10 @@ def test_truthy():
     assert _truthy("YES")
     assert not _truthy("")
     assert not _truthy("0")
+
+
+def test_notify_mode_defaults_to_notification():
+    assert _notify_mode("") == "notification"
+    assert _notify_mode("nonsense") == "notification"
+    assert _notify_mode("alert") == "alert"
+    assert _notify_mode("BOTH") == "both"
