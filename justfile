@@ -123,6 +123,9 @@ sms-send to="+15551234567" text="hello":
 refresh *args:
     uv run operator-os refresh {{args}}
 
+mac-client *args:
+    uv run operator-os mac-client {{args}}
+
 lint:
     uv run ruff check .
 

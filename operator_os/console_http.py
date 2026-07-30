@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hmac
 import threading
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +19,11 @@ from operator_os.console_hub import (
     console_port,
     digit_menu_tree,
     session_cookie_name,
+)
+from operator_os.desktop_bridge import (
+    desktop_client_target,
+    desktop_token,
+    validate_open_url,
 )
 
 STATIC_DIR = Path(__file__).resolve().parent / "console_static"
@@ -70,6 +76,22 @@ class ConsoleHttpServer:
                 self._err(401, "unauthorized")
                 return False
 
+            def _require_desktop_auth(self) -> bool:
+                expected = desktop_token()
+                if not expected:
+                    self._err(503, "desktop bridge not configured")
+                    return False
+                auth = (self.headers.get("Authorization") or "").strip()
+                got = ""
+                if auth.lower().startswith("bearer "):
+                    got = auth[7:].strip()
+                if not got:
+                    got = (self.headers.get("X-Operator-Desktop-Token") or "").strip()
+                if hmac.compare_digest(got.encode(), expected.encode()):
+                    return True
+                self._err(401, "unauthorized")
+                return False
+
             def _read_json(self) -> dict[str, Any]:
                 n = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(n) if n else b"{}"
@@ -115,7 +137,8 @@ class ConsoleHttpServer:
                 self.wfile.write(data)
 
             def do_GET(self) -> None:  # noqa: N802
-                path = urlparse(self.path).path
+                parsed = urlparse(self.path)
+                path = parsed.path
                 if path in ("/", "/index.html"):
                     self._serve_static("index.html")
                     return
@@ -139,6 +162,18 @@ class ConsoleHttpServer:
                     if not self._require_auth():
                         return
                     self._ok_json(hub.status())
+                    return
+                if path == "/api/desktop/events":
+                    if not self._require_desktop_auth():
+                        return
+                    qs = parse_qs(parsed.query)
+                    cid = (qs.get("client_id") or [""])[0]
+                    self._serve_desktop_events(cid)
+                    return
+                if path == "/api/desktop/clients":
+                    if not self._require_auth():
+                        return
+                    self._ok_json({"clients": hub.desktop.clients()})
                     return
                 if path == "/api/inbox":
                     if not self._require_auth():
@@ -170,6 +205,34 @@ class ConsoleHttpServer:
                     return
                 self._err(404, "not found")
 
+            def _send_sse(self, event: str, payload: dict[str, Any]) -> None:
+                data = json.dumps(payload, separators=(",", ":"), default=str)
+                self.wfile.write(f"event: {event}\ndata: {data}\n\n".encode())
+                self.wfile.flush()
+
+            def _serve_desktop_events(self, client_id: str) -> None:
+                try:
+                    client = hub.connect_desktop_client(client_id)
+                except ValueError as e:
+                    self._err(400, str(e))
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                try:
+                    self._send_sse("ready", {"ok": True, "client": client})
+                    while True:
+                        cmd = hub.next_desktop_command(client_id, timeout_s=15.0)
+                        if cmd is None:
+                            self.wfile.write(b": keepalive\n\n")
+                            self.wfile.flush()
+                        else:
+                            self._send_sse("command", cmd)
+                except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+                    hub.disconnect_desktop_client(client_id)
+
             def _serve_vm_audio(self, vm_id: int) -> None:
                 from operator_os import db as store
 
@@ -185,6 +248,36 @@ class ConsoleHttpServer:
 
             def do_POST(self) -> None:  # noqa: N802
                 path = urlparse(self.path).path
+                if path == "/api/desktop/register":
+                    if not self._require_desktop_auth():
+                        return
+                    data = self._read_json()
+                    caps = data.get("capabilities") or []
+                    if not isinstance(caps, list):
+                        caps = []
+                    try:
+                        client = hub.register_desktop_client(
+                            str(data.get("client_id") or ""),
+                            str(data.get("name") or ""),
+                            caps,
+                        )
+                    except ValueError as e:
+                        self._err(400, str(e))
+                        return
+                    self._ok_json({"ok": True, "client": client})
+                    return
+                if path == "/api/desktop/ack":
+                    if not self._require_desktop_auth():
+                        return
+                    data = self._read_json()
+                    hub.ack_desktop_command(
+                        str(data.get("client_id") or ""),
+                        str(data.get("command_id") or ""),
+                        str(data.get("status") or ""),
+                        str(data.get("message") or ""),
+                    )
+                    self._ok_json({"ok": True})
+                    return
                 if path == "/api/login":
                     n = int(self.headers.get("Content-Length") or 0)
                     raw = self.rfile.read(n) if n else b""
@@ -261,6 +354,38 @@ class ConsoleHttpServer:
                         self._err(409, "place call already pending")
                         return
                     self._ok_json({"ok": True, "e164": dest})
+                    return
+                if path == "/api/desktop/open-url":
+                    data = self._read_json()
+                    try:
+                        url = validate_open_url(str(data.get("url") or ""))
+                    except ValueError as e:
+                        self._err(400, str(e))
+                        return
+                    cmd = hub.queue_desktop_command(
+                        "desktop.open_url",
+                        {"url": url, "title": str(data.get("title") or "")[:120]},
+                        target_id=str(data.get("client_id") or desktop_client_target()),
+                    )
+                    if cmd is None:
+                        self._err(409, "no desktop client online")
+                        return
+                    self._ok_json({"ok": True, "command": cmd})
+                    return
+                if path == "/api/desktop/notify":
+                    data = self._read_json()
+                    cmd = hub.queue_desktop_command(
+                        "desktop.notify",
+                        {
+                            "title": str(data.get("title") or "Operator")[:80],
+                            "body": str(data.get("body") or "")[:240],
+                        },
+                        target_id=str(data.get("client_id") or desktop_client_target()),
+                    )
+                    if cmd is None:
+                        self._err(409, "no desktop client online")
+                        return
+                    self._ok_json({"ok": True, "command": cmd})
                     return
                 if path == "/api/inbox/sms/heard":
                     data = self._read_json()
@@ -368,6 +493,7 @@ class ConsoleHttpServer:
                 self._ok_json({"ok": True, "to": dest})
 
         self._httpd = ThreadingHTTPServer((self.host, self.port), Handler)
+        self._httpd.daemon_threads = True
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._thread.start()
 

@@ -9,7 +9,7 @@ Two ways to reach services:
 | `3` | **WAMU 88.5** — live NPR stream |
 | `4` | **NWS radio** — NOAA Weather Radio KHB36 |
 | `5` | **Messages** — universal inbox (SMS + voicemail, chrono); flash skips / reply / callback |
-| `7` | **Join meeting** — Google Calendar Meet phone dial-in + PIN |
+| `7` | **Join meeting** — Google Calendar Meet phone dial-in or Mac desktop open |
 | `8` | **Information desk** — turn-based STT → tools → Piper |
 | `9` | **Outside line** — Telnyx SIP |
 
@@ -29,6 +29,16 @@ Requires Google OAuth in `.env` (`GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` / `_REFRES
      (“Number one, … Dial to choose.”); dial **1–N** to join (pulses collected
      in that state — not under a soft session)
 4. None found → spoken refusal; hangup cancels a live call
+
+Default target is the handset/PSTN path. To have the phone command a Mac to open
+the current Meet instead, enable the desktop bridge and set:
+
+```bash
+OPERATOR_MEET_JOIN_TARGET=desktop
+```
+
+`auto` prefers a connected desktop client and falls back to the handset/PSTN path
+when SIP is configured. See [desktop-bridge.md](desktop-bridge.md).
 
 ## Local menu (digit 0)
 

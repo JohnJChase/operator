@@ -12,6 +12,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from operator_os.desktop_bridge import DesktopRegistry
+
 
 DEFAULT_PORT = 8788
 RING_TEST_MS = 1500  # auto-expire; under hardware max_ring_on_ms
@@ -49,6 +51,7 @@ class ConsoleHub:
     _outside_buffer: str = field(default="", init=False)
     _last_event: str = field(default="", init=False)
     _last_reason: str = field(default="", init=False)
+    desktop: DesktopRegistry = field(default_factory=DesktopRegistry)
     _session_ttl_s: float = 86400.0
 
     def note_digit(self, digit: int) -> None:
@@ -87,7 +90,37 @@ class ConsoleHub:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
-            return dict(self._status)
+            return {**self._status, "desktop_clients": self.desktop.clients()}
+
+    def register_desktop_client(
+        self, client_id: str, name: str, capabilities: list[str]
+    ) -> dict[str, Any]:
+        return self.desktop.register(client_id, name, capabilities)
+
+    def connect_desktop_client(self, client_id: str) -> dict[str, Any]:
+        return self.desktop.connect(client_id)
+
+    def disconnect_desktop_client(self, client_id: str) -> None:
+        self.desktop.disconnect(client_id)
+
+    def next_desktop_command(
+        self, client_id: str, *, timeout_s: float = 15.0
+    ) -> dict[str, Any] | None:
+        return self.desktop.next_command(client_id, timeout_s=timeout_s)
+
+    def queue_desktop_command(
+        self,
+        command_type: str,
+        payload: dict[str, Any],
+        *,
+        target_id: str = "",
+    ) -> dict[str, Any] | None:
+        return self.desktop.queue_command(command_type, payload, target_id=target_id)
+
+    def ack_desktop_command(
+        self, client_id: str, command_id: str, status: str, message: str = ""
+    ) -> None:
+        self.desktop.ack(client_id, command_id, status, message)
 
     def request_ring_test(self) -> bool:
         """Queue a ring test. Returns False if one already pending."""

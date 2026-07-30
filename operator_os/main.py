@@ -81,6 +81,12 @@ def main(argv: list[str] | None = None) -> None:
     snd = sub.add_parser("sms-send", help="send one outbound SMS via Telnyx")
     snd.add_argument("--to", required=True)
     snd.add_argument("--text", required=True)
+    mc = sub.add_parser("mac-client", help="connect this Mac as a desktop bridge client")
+    mc.add_argument("--pi-url", default=None, help="Pi URL, e.g. http://operator.local:8788")
+    mc.add_argument("--token", default=None, help="shared OPERATOR_DESKTOP_TOKEN")
+    mc.add_argument("--client-id", default=None, help="stable client id")
+    mc.add_argument("--name", default=None, help="display name")
+    mc.add_argument("--once", action="store_true", help="connect once; do not retry")
     sub.add_parser("status", help="print profile and current state summary")
     sub.add_parser("chart", help="regenerate docs/state-chart.md from the FSM")
     ref = sub.add_parser("refresh", help="fetch and cache news/weather")
@@ -138,6 +144,21 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_sms_inject(args))
     if args.cmd == "sms-send":
         raise SystemExit(_sms_send_cli(args))
+    if args.cmd == "mac-client":
+        from operator_os.mac_client import run_mac_client
+
+        mac_args: list[str] = []
+        if args.pi_url is not None:
+            mac_args.extend(["--pi-url", args.pi_url])
+        if args.token is not None:
+            mac_args.extend(["--token", args.token])
+        if args.client_id is not None:
+            mac_args.extend(["--client-id", args.client_id])
+        if args.name is not None:
+            mac_args.extend(["--name", args.name])
+        if args.once:
+            mac_args.append("--once")
+        raise SystemExit(run_mac_client(mac_args))
     if args.cmd == "refresh":
         from operator_os.refresh import refresh_all
 
@@ -330,6 +351,12 @@ def run_loop(
         console_password,
     )
     from operator_os.console_http import ConsoleHttpServer
+    from operator_os.desktop_bridge import (
+        desktop_client_target,
+        desktop_token,
+        meet_join_target,
+        meet_video_url,
+    )
 
     console_hub = ConsoleHub(events_tail=lambda: list(events.recent))
     console_http: ConsoleHttpServer | None = None
@@ -739,8 +766,15 @@ def run_loop(
             audio.speak("Calendar is not linked. Run calendar auth on the Pi.", wait=False)
             expect_service_done = True
             return False
-        if not sip_configured():
-            audio.speak("Outside line is not configured.", wait=False)
+        if not _meet_phone_ready() and not _meet_desktop_ready():
+            target = meet_join_target()
+            if target == "desktop":
+                msg = "Your Mac is not connected."
+            elif target == "auto":
+                msg = "Your Mac is not connected, and outside line is not configured."
+            else:
+                msg = "Outside line is not configured."
+            audio.speak(msg, wait=False)
             expect_service_done = True
             return False
         if live_audio and phone.is_off_hook():
@@ -758,6 +792,15 @@ def run_loop(
         finally:
             audio.stop()
         if decision.meeting is not None:
+            if _meet_should_open_desktop():
+                if _arm_meet_desktop(decision.meeting, wait=False):
+                    return False
+                if meet_join_target() == "desktop":
+                    return False
+            if not _meet_phone_ready():
+                audio.speak("Outside line is not configured.", wait=False)
+                expect_service_done = True
+                return False
             _arm_meet_call(ensure_us_dial_in(decision.meeting))
             return True
         if decision.choices:
@@ -770,11 +813,55 @@ def run_loop(
         expect_service_done = True
         return False
 
-    def _arm_meet_call(meet) -> None:
-        nonlocal sip_dest, sip_dtmf
+    def _meet_phone_ready() -> bool:
+        target = meet_join_target()
+        return target in ("phone", "auto") and sip_configured()
+
+    def _meet_desktop_ready() -> bool:
+        target = meet_join_target()
+        return target in ("desktop", "auto") and console_hub.desktop.has_online_client(
+            capability="open_url",
+            target_id=desktop_client_target(),
+        )
+
+    def _meet_should_open_desktop() -> bool:
+        target = meet_join_target()
+        if target == "desktop":
+            return True
+        return target == "auto" and _meet_desktop_ready()
+
+    def _arm_meet_desktop(meet, *, wait: bool) -> bool:
+        nonlocal expect_service_done
+        title = _meet_title(meet)
+        url = meet_video_url(meet)
+        if not url:
+            audio.speak("That meeting does not have a desktop link.", wait=False)
+            expect_service_done = True
+            return False
+        cmd = console_hub.queue_desktop_command(
+            "desktop.open_url",
+            {"url": url, "title": title},
+            target_id=desktop_client_target(),
+        )
+        if cmd is None:
+            audio.speak("Your Mac is not connected.", wait=False)
+            expect_service_done = True
+            return False
+        audio.speak(f"Opening {title} on your Mac.", wait=wait)
+        events.emit("desktop", value="open_meet", detail=url)
+        _status(f"desktop: open meet {url}")
+        expect_service_done = not wait
+        return True
+
+    def _meet_title(meet) -> str:
         title = " ".join((meet.title or "").split()) or "the meeting"
         if len(title) > 48:
             title = title[:45].rstrip() + "…"
+        return title
+
+    def _arm_meet_call(meet) -> None:
+        nonlocal sip_dest, sip_dtmf
+        title = _meet_title(meet)
         audio.speak(f"Connecting to {title}.", wait=True)
         events.emit("calendar", value="join", detail=meet.e164)
         sip_dest = meet.e164
@@ -908,19 +995,21 @@ def run_loop(
             _status(f"sms: webhook failed {e}")
     elif live_audio:
         _status("sms: not configured — inbound webhook off")
-    if console_password():
+    if console_password() or desktop_token():
         try:
             console_http = ConsoleHttpServer(console_hub)
             console_http.start()
-            _status(
-                f"console: http://{console_http.host}:{console_http.port}/ "
-                "(password required)"
-            )
+            suffix = []
+            if console_password():
+                suffix.append("console password required")
+            if desktop_token():
+                suffix.append("desktop bridge enabled")
+            _status(f"console: http://{console_http.host}:{console_http.port}/ ({'; '.join(suffix)})")
         except Exception as e:
             console_http = None
             _status(f"console: failed {e}")
     else:
-        _status("console: off (set OPERATOR_CONSOLE_PASSWORD to enable)")
+        _status("console: off (set OPERATOR_CONSOLE_PASSWORD or OPERATOR_DESKTOP_TOKEN to enable)")
     _publish_console()
     try:
         while True:
@@ -1205,15 +1294,25 @@ def run_loop(
                     if 1 <= digit <= n:
                         from operator_os.google_calendar import ensure_us_dial_in
 
-                        meet = ensure_us_dial_in(meet_choices[digit - 1])
+                        meet = meet_choices[digit - 1]
                         meet_choices = []
                         meet_deadline = None
-                        # Speak while AudioRouter still owns the handset; SIP
-                        # seize (stop → settle → bridge → dial) follows.
-                        _arm_meet_call(meet)
-                        apply(ctl.handle(Event("digit", value=digit)))
-                        if sip_session is None and live_audio:
-                            apply(ctl.handle(Event("sip_done")))
+                        if _meet_should_open_desktop():
+                            _arm_meet_desktop(meet, wait=True)
+                            apply(ctl.handle(Event("meet_cancel")))
+                        else:
+                            if not _meet_phone_ready():
+                                audio.speak("Outside line is not configured.", wait=True)
+                                apply(ctl.handle(Event("meet_cancel")))
+                                time.sleep(0.02)
+                                continue
+                            meet = ensure_us_dial_in(meet)
+                            # Speak while AudioRouter still owns the handset; SIP
+                            # seize (stop → settle → bridge → dial) follows.
+                            _arm_meet_call(meet)
+                            apply(ctl.handle(Event("digit", value=digit)))
+                            if sip_session is None and live_audio:
+                                apply(ctl.handle(Event("sip_done")))
                     elif digit == 0:
                         meet_choices = []
                         meet_deadline = None

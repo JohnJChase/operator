@@ -1,6 +1,9 @@
 """Virtual SIP line + handset bridge."""
 
 from pathlib import Path
+import shutil
+
+import pytest
 
 from operator_os.handset_bridge import (
     HandsetBridge,
@@ -39,6 +42,8 @@ def test_handset_sip_guard_arm_release_roundtrip():
     """Live ATR2x only — save → lower capture → restore."""
     import subprocess
 
+    if shutil.which("amixer") is None:
+        pytest.skip("amixer not installed")
     probe = subprocess.run(
         ["amixer", "-c", "2", "sget", "Mic"],
         check=False,

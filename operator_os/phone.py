@@ -6,10 +6,13 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from operator_os.config import HardwareProfile
 from operator_os.dial import DialDecoder
 
+if TYPE_CHECKING:
+    from operator_os.audio import AudioRouter
 
 PulseCallback = Callable[[], None]
 HookCallback = Callable[[bool], None]
@@ -202,7 +205,7 @@ def _stdin_enter_pressed() -> bool:
         return False
     if not ready:
         return False
-    line = sys.stdin.readline()
+    sys.stdin.readline()
     return True  # any line / Enter
 
 

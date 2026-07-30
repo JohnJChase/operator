@@ -14,6 +14,7 @@ Local telephone exchange for a Western Electric 302 on a Raspberry Pi.
 6. Read `PERFBOARD_AUDIO_BUILD_GUIDE.md` before soldering receiver, mic, and
    sidetone.
 7. Use `config/hardware_profile.yaml` (from the Rev A template).
+8. Read `docs/desktop-bridge.md` when wiring a Mac companion client.
 
 ## Setup (on the Pi)
 
@@ -30,6 +31,7 @@ just simulate
 just simulate --script off,digit:1,hangup
 just run
 just status
+just mac-client       # on the Mac, after setting OPERATOR_PI_URL + token
 just speak-test
 just mic-test
 just --list          # all recipes
@@ -44,3 +46,4 @@ diagnostics. See `docs/pi-dev-environment.md` and
 Leave-it-plugged-in: `docs/systemd.md` + `deploy/operator-os.service`.
 Operator modes (digit 0 menu, digit 8 Realtime, digit 9 SIP): `docs/ai-operator.md`,
 `docs/sip-outside-line.md`.
+Mac companion bridge: `docs/desktop-bridge.md`.
