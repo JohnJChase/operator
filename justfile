@@ -20,10 +20,24 @@ build-pjsua:
     echo "installed tools/pjsua"
 
 setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      just setup-mac
+    else
+      just setup-pi
+    fi
+
+setup-pi:
     # Pi needs system python3-lgpio for gpiozero (lgpio pin factory).
     uv venv --clear --system-site-packages
     uv sync --extra dev
     just setup-voices
+
+setup-mac:
+    # Mac companion client only. No GPIO system packages or Piper voice weights.
+    uv venv --clear
+    uv sync --extra dev
 
 setup-voices:
     #!/usr/bin/env bash

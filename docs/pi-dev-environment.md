@@ -16,11 +16,16 @@ Date: 2026-07-20
 curl -LsSf https://astral.sh/uv/install.sh | sh
 # install just similarly, or use the just.systems installer
 just setup
+# or explicitly:
+just setup-pi
 ```
 
-`just setup` creates the venv with `--system-site-packages` so gpiozero can
-use the OS `python3-lgpio` pin factory on Raspberry Pi OS. A plain
+On the Pi, `just setup` creates the venv with `--system-site-packages` so
+gpiozero can use the OS `python3-lgpio` pin factory on Raspberry Pi OS. A plain
 `uv sync` without that flag will fail GPIO open with `BadPinFactory`.
+
+On the Mac companion, use `just setup-mac`. It creates a normal local venv and
+skips Pi-only voice/GPIO setup.
 
 ## Hook priority (hardware cutoff)
 

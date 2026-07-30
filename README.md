@@ -24,6 +24,13 @@ just test
 just selftest
 ```
 
+## Setup (on the Mac companion)
+
+```bash
+just setup-mac
+just mac-client
+```
+
 ## Run
 
 ```bash

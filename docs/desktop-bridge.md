@@ -63,7 +63,7 @@ client:
 ```bash
 git clone git@github.com:JohnJChase/operator.git
 cd operator
-just setup
+just setup-mac
 export OPERATOR_PI_URL=http://operator.local:8788
 export OPERATOR_DESKTOP_TOKEN=replace-with-the-same-token
 export OPERATOR_DESKTOP_CLIENT_ID=john-macbook
