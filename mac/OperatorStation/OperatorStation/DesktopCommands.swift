@@ -75,12 +75,14 @@ enum CommandError: LocalizedError, Equatable {
     case invalidURL
     case urlHasCredentials
     case unsupported(String)
+    case rejected(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "url must be http(s)"
         case .urlHasCredentials: return "url must not include credentials"
         case .unsupported(let kind): return "unsupported command: \(kind)"
+        case .rejected(let reason): return reason
         }
     }
 }

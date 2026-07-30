@@ -216,6 +216,11 @@ class ConsoleHttpServer:
 
                     self._ok_json({"contacts": [contact_to_dict(c) for c in list_contacts()]})
                     return
+                if path == "/api/routing":
+                    if not self._require_inbox_auth():
+                        return
+                    self._ok_json(hub.routing_snapshot())
+                    return
                 if path == "/api/streams":
                     if not self._require_auth():
                         return
@@ -413,6 +418,22 @@ class ConsoleHttpServer:
                     from operator_os.phonebook import delete_contact
 
                     self._ok_json({"ok": delete_contact(int(data.get("id") or 0))})
+                    return
+                if path == "/api/routing":
+                    if not self._require_inbox_auth():
+                        return
+                    data = self._read_json()
+                    try:
+                        priorities = hub.set_routing_priorities(
+                            data.get("priorities") if isinstance(data.get("priorities"), dict) else data
+                        )
+                    except ValueError as e:
+                        self._err(400, str(e))
+                        return
+                    except OSError as e:
+                        self._err(500, str(e))
+                        return
+                    self._ok_json({"ok": True, "priorities": priorities})
                     return
                 if not self._require_auth():
                     return

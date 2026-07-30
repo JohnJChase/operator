@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import urllib.error
 import urllib.request
 from typing import Any
@@ -21,6 +22,28 @@ from operator_os.desktop_bridge import (
     validate_open_url,
 )
 from operator_os.google_calendar import MeetDialIn
+from operator_os.route_priority import INTENT_OPEN_MEETING, WE302_MEET_ID
+
+
+@pytest.fixture
+def priority_file(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    path = tmp_path / "route_priority.json"
+    monkeypatch.setattr("operator_os.route_priority.PRIORITY_PATH", path)
+    monkeypatch.delenv("OPERATOR_DESKTOP_CLIENT_ID", raising=False)
+    monkeypatch.delenv("OPERATOR_ROUTE_OPEN_MEETING", raising=False)
+    monkeypatch.setenv("OPERATOR_MEET_JOIN_TARGET", "auto")
+    return path
+
+
+def _ack_accept(bridge: DesktopBridge, client_id: str) -> threading.Thread:
+    def run() -> None:
+        cmd = bridge.next_command(client_id, timeout_s=1.0)
+        if cmd:
+            bridge.ack_command(client_id, cmd["id"], "accept")
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t
 
 
 def test_desktop_registry_queues_for_online_capable_client():
@@ -67,7 +90,8 @@ def test_meet_video_url_from_dial_in():
     assert meeting_title(dial) == "Standup"
 
 
-def test_desktop_bridge_named_intents():
+def test_desktop_bridge_named_intents(priority_file, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OPERATOR_MEET_JOIN_TARGET", "desktop")
     bridge = DesktopBridge()
     client = bridge.register_client("macbook", "MacBook", ["open_url", "notify"])
     cid = client["client_id"]
@@ -78,12 +102,14 @@ def test_desktop_bridge_named_intents():
         e164="+15550100999",
         conference_id="abc-defg-hij",
     )
-    delivery = bridge.open_meeting(meet)
+    waiter = _ack_accept(bridge, cid)
+    delivery = bridge.open_meeting(meet, mode="desktop", accept_timeout=1.0)
+    waiter.join(timeout=2.0)
     assert delivery.ok
-    cmd = bridge.next_command(cid, timeout_s=0.01)
-    assert cmd == delivery.command
-    assert cmd["type"] == "desktop.open_url"
-    assert cmd["payload"]["url"] == "https://meet.google.com/abc-defg-hij"
+    assert delivery.handler == cid
+    assert delivery.command is not None
+    assert delivery.command["type"] == "desktop.open_url"
+    assert delivery.command["payload"]["url"] == "https://meet.google.com/abc-defg-hij"
 
     delivery = bridge.notify_inbound_sms(
         message_id=7,
@@ -106,12 +132,12 @@ def test_desktop_bridge_reports_no_client_for_intent():
     assert bridge.client_summary() == "none"
 
 
-def test_desktop_bridge_client_summary():
+def test_desktop_bridge_client_summary(priority_file):
     bridge = DesktopBridge()
     client = bridge.register_client("macbook", "MacBook", ["open_url", "notify"])
-    assert bridge.client_summary() == "macbook:offline:open_url,notify"
+    assert bridge.client_summary() == "macbook:offline:open_url,notify:desktop"
     bridge.connect_client(client["client_id"])
-    assert bridge.client_summary() == "macbook:online:open_url,notify"
+    assert bridge.client_summary() == "macbook:online:open_url,notify:desktop"
 
 
 def test_stale_sse_disconnect_does_not_offline_newer_stream():
@@ -151,7 +177,7 @@ def test_superseded_sse_waiter_does_not_steal_commands():
     assert cmd == delivery.command
 
 
-def test_notify_fans_out_ignoring_preferred_client(monkeypatch: pytest.MonkeyPatch):
+def test_notify_fans_out_ignoring_preferred_client(monkeypatch: pytest.MonkeyPatch, priority_file):
     monkeypatch.setenv("OPERATOR_DESKTOP_CLIENT_ID", "mac-a")
     bridge = DesktopBridge()
     for cid in ("mac-b", "mac-a"):
@@ -175,7 +201,7 @@ def test_notify_fans_out_ignoring_preferred_client(monkeypatch: pytest.MonkeyPat
     assert bridge.next_command("mac-a", timeout_s=0.01) is None
 
 
-def test_open_url_unicast_to_preferred_when_online(monkeypatch: pytest.MonkeyPatch):
+def test_open_url_unicast_to_preferred_when_online(monkeypatch: pytest.MonkeyPatch, priority_file):
     monkeypatch.setenv("OPERATOR_DESKTOP_CLIENT_ID", "mac-b")
     bridge = DesktopBridge()
     for cid in ("mac-a", "mac-b"):
@@ -190,6 +216,7 @@ def test_open_url_unicast_to_preferred_when_online(monkeypatch: pytest.MonkeyPat
 
 def test_open_url_falls_back_to_first_online_when_preferred_offline(
     monkeypatch: pytest.MonkeyPatch,
+    priority_file,
 ):
     monkeypatch.setenv("OPERATOR_DESKTOP_CLIENT_ID", "mac-offline")
     bridge = DesktopBridge()
@@ -207,10 +234,11 @@ def test_open_url_falls_back_to_first_online_when_preferred_offline(
     assert bridge.next_command("mac-offline", timeout_s=0.01) is None
 
 
-def test_open_meeting_unicast_not_fanout(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("OPERATOR_DESKTOP_CLIENT_ID", raising=False)
+def test_open_meeting_failover_priority_order(priority_file, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OPERATOR_MEET_JOIN_TARGET", "desktop")
     bridge = DesktopBridge()
-    for cid in ("mac-b", "mac-a"):
+    bridge.set_priorities({INTENT_OPEN_MEETING: ["mac-b", "mac-a"]})
+    for cid in ("mac-a", "mac-b"):
         bridge.register_client(cid, cid, ["open_url", "notify"])
         bridge.connect_client(cid)
 
@@ -219,10 +247,68 @@ def test_open_meeting_unicast_not_fanout(monkeypatch: pytest.MonkeyPatch):
         e164="+15550100999",
         conference_id="abc-defg-hij",
     )
-    delivery = bridge.open_meeting(meet)
+
+    def reject_then_accept() -> None:
+        cmd = bridge.next_command("mac-b", timeout_s=1.0)
+        assert cmd is not None
+        bridge.ack_command("mac-b", cmd["id"], "reject", "busy")
+        cmd = bridge.next_command("mac-a", timeout_s=1.0)
+        assert cmd is not None
+        bridge.ack_command("mac-a", cmd["id"], "accept")
+
+    t = threading.Thread(target=reject_then_accept, daemon=True)
+    t.start()
+    delivery = bridge.open_meeting(meet, mode="desktop", accept_timeout=1.0)
+    t.join(timeout=3.0)
     assert delivery.ok
-    assert bridge.next_command("mac-a", timeout_s=0.01) == delivery.command
-    assert bridge.next_command("mac-b", timeout_s=0.01) is None
+    assert delivery.handler == "mac-a"
+
+
+def test_open_meeting_falls_to_we302(priority_file, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OPERATOR_MEET_JOIN_TARGET", "auto")
+    bridge = DesktopBridge()
+    bridge.register_local(WE302_MEET_ID, "WE302 Meet", ["open.meeting"], eligible=lambda: True)
+    bridge.set_priorities({INTENT_OPEN_MEETING: ["mac-a", WE302_MEET_ID]})
+    bridge.register_client("mac-a", "Mac", ["open_url"])
+    bridge.connect_client("mac-a")
+
+    meet = MeetDialIn(
+        title="Standup",
+        e164="+15550100999",
+        conference_id="abc-defg-hij",
+    )
+
+    def reject_mac() -> None:
+        cmd = bridge.next_command("mac-a", timeout_s=1.0)
+        assert cmd is not None
+        bridge.ack_command("mac-a", cmd["id"], "reject")
+
+    t = threading.Thread(target=reject_mac, daemon=True)
+    t.start()
+    delivery = bridge.open_meeting(meet, mode="auto", accept_timeout=1.0)
+    t.join(timeout=2.0)
+    assert delivery.ok
+    assert delivery.handler == WE302_MEET_ID
+    assert delivery.command is not None
+    assert delivery.command["type"] == "local.meet_sip"
+
+
+def test_open_meeting_phone_mode_skips_desktop(priority_file):
+    bridge = DesktopBridge()
+    bridge.register_local(WE302_MEET_ID, "WE302 Meet", ["open.meeting"], eligible=lambda: True)
+    bridge.set_priorities({INTENT_OPEN_MEETING: ["mac-a", WE302_MEET_ID]})
+    bridge.register_client("mac-a", "Mac", ["open_url"])
+    bridge.connect_client("mac-a")
+
+    meet = MeetDialIn(
+        title="Standup",
+        e164="+15550100999",
+        conference_id="abc-defg-hij",
+    )
+    delivery = bridge.open_meeting(meet, mode="phone", accept_timeout=0.2)
+    assert delivery.ok
+    assert delivery.handler == WE302_MEET_ID
+    assert bridge.next_command("mac-a", timeout_s=0.01) is None
 
 
 def test_sms_notification_payload_prefers_contact_name_and_truncates():
@@ -239,7 +325,7 @@ def test_sms_notification_payload_prefers_contact_name_and_truncates():
     assert payload["body"].endswith("...")
 
 
-def test_http_desktop_register_requires_bearer(monkeypatch: pytest.MonkeyPatch):
+def test_http_desktop_register_requires_bearer(monkeypatch: pytest.MonkeyPatch, priority_file):
     monkeypatch.setenv("OPERATOR_DESKTOP_TOKEN", "desk-token")
     hub = ConsoleHub()
     srv = ConsoleHttpServer(hub, host="127.0.0.1", port=0)
@@ -280,7 +366,49 @@ def test_http_desktop_register_requires_bearer(monkeypatch: pytest.MonkeyPatch):
         srv.stop()
 
 
-def test_http_desktop_sse_receives_queued_command(monkeypatch: pytest.MonkeyPatch):
+def test_http_routing_get_put(monkeypatch: pytest.MonkeyPatch, priority_file):
+    monkeypatch.setenv("OPERATOR_DESKTOP_TOKEN", "desk-token")
+    hub = ConsoleHub()
+    hub.register_local_station(WE302_MEET_ID, "WE302 Meet", ["open.meeting"], eligible=lambda: True)
+    hub.register_desktop_client("macbook", "MacBook", ["open_url"])
+    srv = ConsoleHttpServer(hub, host="127.0.0.1", port=0)
+    srv.start()
+    assert srv._httpd is not None
+    base = f"http://127.0.0.1:{srv._httpd.server_address[1]}"
+
+    def call(method: str, path: str, body: dict | None = None):
+        data = None if body is None else json.dumps(body).encode()
+        req = urllib.request.Request(
+            base + path,
+            data=data,
+            method=method,
+            headers={
+                "Authorization": "Bearer desk-token",
+                "Content-Type": "application/json",
+            },
+        )
+        return json.loads(urllib.request.urlopen(req, timeout=2).read())
+
+    try:
+        snap = call("GET", "/api/routing")
+        assert "priorities" in snap
+        assert any(s["client_id"] == WE302_MEET_ID for s in snap["stations"])
+        saved = call(
+            "POST",
+            "/api/routing",
+            {"priorities": {INTENT_OPEN_MEETING: [WE302_MEET_ID, "macbook"]}},
+        )
+        assert saved["ok"] is True
+        assert saved["priorities"][INTENT_OPEN_MEETING] == [WE302_MEET_ID, "macbook"]
+        assert hub.routing_snapshot()["priorities"][INTENT_OPEN_MEETING] == [
+            WE302_MEET_ID,
+            "macbook",
+        ]
+    finally:
+        srv.stop()
+
+
+def test_http_desktop_sse_receives_queued_command(monkeypatch: pytest.MonkeyPatch, priority_file):
     monkeypatch.setenv("OPERATOR_DESKTOP_TOKEN", "desk-token")
     hub = ConsoleHub()
     hub.register_desktop_client("macbook", "MacBook", ["open_url"])

@@ -45,13 +45,40 @@ Feature code should not build raw `desktop.*` payloads. Add a named method to
 `DesktopBridge` first, add one small test, then call that method from the
 feature path.
 
-Routing modes (Phase 1):
+Routing modes:
 
-- `desktop.notify` (SMS / message alerts): fan out to every online client with
+- `desktop.notify` (SMS / message alerts): **fan-out** to every online client with
   the `notify` capability. `OPERATOR_DESKTOP_CLIENT_ID` does not restrict this.
-- `desktop.open_url` / Meet opens: unicast to `OPERATOR_DESKTOP_CLIENT_ID` when
-  that client is online and capable; otherwise the first capable online client
-  (stable order by `client_id`).
+- `open.meeting` (digit 7 / Meet): **failover** down an ordered station list.
+  The Pi offers each hop in turn and waits for an ack (`accept` / `reject` /
+  timeout / `error`). First `accept` wins; `ok` still counts as accept for older
+  clients. Local station `we302-meet` is the handset SIP Meet path (no SSE).
+- `desktop.open_url` (console diagnostic): still **unicast** to the preferred
+  client when online, else first capable online client.
+
+Meet priority lives in `data/route_priority.json` (gitignored). Bootstrap from
+env when the file is missing:
+
+```bash
+OPERATOR_ROUTE_OPEN_MEETING=john-macbook,we302-meet
+OPERATOR_MEET_JOIN_TARGET=auto
+# optional accept wait per hop (default 2.5s)
+OPERATOR_DESKTOP_ACCEPT_TIMEOUT_S=2.5
+```
+
+`OPERATOR_MEET_JOIN_TARGET` filters candidates: `phone` = only `we302-meet`,
+`desktop` = only Mac stations advertising `open_url`, `auto` = full priority
+list. Edit order from the Mac app: **Meet priority…** (or `GET`/`POST`
+`/api/routing` with the desktop token).
+
+Optional preferred client for diagnostic URL opens only:
+
+```bash
+OPERATOR_DESKTOP_CLIENT_ID=john-macbook
+```
+
+Blank means "first online client with `open_url`" for diagnostic opens.
+Notifications still fan out to every online `notify` client.
 
 ## Pi setup
 
@@ -65,30 +92,6 @@ OPERATOR_CONSOLE_BIND=0.0.0.0
 
 The HTTP server starts when either `OPERATOR_CONSOLE_PASSWORD` or
 `OPERATOR_DESKTOP_TOKEN` is set.
-
-To make digit 7 open the current Meet on the Mac instead of dialing the Meet
-phone bridge:
-
-```bash
-OPERATOR_MEET_JOIN_TARGET=desktop
-```
-
-Use `auto` to prefer the Mac when it is connected **and advertising
-`open_url`** (Mac Settings → “Open Meet on this Mac”), and fall back to the
-handset PSTN path when SIP is configured:
-
-```bash
-OPERATOR_MEET_JOIN_TARGET=auto
-```
-
-Optional preferred client for Meet/URL opens only:
-
-```bash
-OPERATOR_DESKTOP_CLIENT_ID=john-macbook
-```
-
-Blank means "first online client with `open_url`" for opens. Notifications still
-fan out to every online `notify` client.
 
 ## Mac setup
 
@@ -108,9 +111,10 @@ Center permission on first launch and registers with caps `open_url,notify` over
 the existing `/api/desktop/*` SSE + POST protocol.
 
 Quit and reopen should reconnect without restarting the Pi. Menu bar items open
-**Inbox**, **Directory**, and **Place call** windows (desktop token). Directory can
-import one-shot from Mac Contacts into the exchange phonebook; Place call can dial
-an exchange contact or a number picked from Mac Contacts (no Contacts sync).
+**Inbox**, **Directory**, **Place call**, and **Meet priority** windows (desktop
+token). Directory can import one-shot from Mac Contacts into the exchange
+phonebook; Place call can dial an exchange contact or a number picked from Mac
+Contacts (no Contacts sync). Meet priority edits the Pi failover order for digit 7.
 
 The Python CLI below remains a debug fallback.
 
@@ -215,17 +219,19 @@ affect SMS notify fan-out.
 
 ## Digit 7 flow
 
-With `OPERATOR_MEET_JOIN_TARGET=desktop`:
+With `OPERATOR_MEET_JOIN_TARGET=auto` and priority `john-macbook,we302-meet`:
 
 1. Lift the handset.
 2. Dial 7.
 3. The Pi resolves the active Google Calendar Meet.
-4. The Pi queues `desktop.open_url` with the Meet URL.
-5. The Mac opens the meeting in the default browser.
-6. The handset says "Opening <meeting> on your Mac."
+4. The Pi offers `john-macbook` a `desktop.open_url` and waits for `accept`.
+5. On accept, the Mac opens the meeting; the handset says "Opening … on your Mac."
+6. On reject/timeout/error, the Pi tries the next station (`we302-meet` → SIP dial).
+
+With `desktop`, only Mac stations are tried. With `phone`, only `we302-meet`.
 
 Existing multi-meeting behavior stays intact. If several meetings are possible,
-the phone reads the menu and the selected meeting opens on the Mac.
+the phone reads the menu and the selected meeting uses the same failover path.
 
 ## Incoming SMS
 

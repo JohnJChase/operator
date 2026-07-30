@@ -84,6 +84,43 @@ struct PlantStatusPayload: Decodable {
     }
 }
 
+struct RoutingStation: Identifiable, Hashable, Decodable {
+    var clientId: String
+    var name: String
+    var capabilities: [String]
+    var online: Bool
+    var kind: String
+
+    var id: String { clientId }
+
+    enum CodingKeys: String, CodingKey {
+        case name, capabilities, online, kind
+        case clientId = "client_id"
+    }
+
+    var label: String {
+        let state = online ? "online" : "offline"
+        return "\(name) (\(clientId), \(state))"
+    }
+}
+
+struct RoutingPayload: Decodable {
+    var priorities: [String: [String]]
+    var stations: [RoutingStation]
+    var meetJoinTarget: String?
+    var acceptTimeoutS: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case priorities, stations
+        case meetJoinTarget = "meet_join_target"
+        case acceptTimeoutS = "accept_timeout_s"
+    }
+
+    var openMeetingOrder: [String] {
+        priorities["open.meeting"] ?? []
+    }
+}
+
 private extension String {
     var nilIfEmpty: String? {
         let t = trimmingCharacters(in: .whitespacesAndNewlines)
@@ -198,6 +235,20 @@ struct ExchangeAPI {
         struct Envelope: Decodable { var e164: String }
         let env: Envelope = try await postDecode("/api/place-call", ["e164": e164])
         return env.e164
+    }
+
+    func fetchRouting() async throws -> RoutingPayload {
+        try await get("/api/routing")
+    }
+
+    func saveMeetingPriority(_ order: [String]) async throws -> [String] {
+        struct Envelope: Decodable {
+            var priorities: [String: [String]]
+        }
+        let env: Envelope = try await postDecode("/api/routing", [
+            "priorities": ["open.meeting": order],
+        ])
+        return env.priorities["open.meeting"] ?? order
     }
 
     // MARK: - HTTP

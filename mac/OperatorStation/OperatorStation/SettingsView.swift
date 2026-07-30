@@ -31,8 +31,8 @@ struct SettingsView: View {
             } footer: {
                 Text(
                     settings.receiveMeetings
-                        ? "Digit 7 can open Meet here (caps include open_url)."
-                        : "Meet opens elsewhere. On the Pi use OPERATOR_MEET_JOIN_TARGET=auto so digit 7 falls back to the handset SIP path."
+                        ? "Digit 7 can open Meet here (caps include open_url). Edit order under Meet priority…"
+                        : "Meet opens elsewhere. Use Meet priority… and OPERATOR_MEET_JOIN_TARGET=auto so digit 7 can fall through to WE302 SIP."
                 )
             }
             Section("Connection") {

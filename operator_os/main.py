@@ -429,8 +429,15 @@ def run_loop(
         meeting_title,
         meet_join_target,
     )
+    from operator_os.route_priority import WE302_MEET_ID
 
     console_hub = ConsoleHub(events_tail=lambda: list(events.recent))
+    console_hub.register_local_station(
+        WE302_MEET_ID,
+        "WE302 Meet",
+        ["open.meeting"],
+        eligible=sip_configured,
+    )
     console_http: ConsoleHttpServer | None = None
     service_digit: int | None = None
 
@@ -868,7 +875,6 @@ def run_loop(
         nonlocal expect_service_done, sip_dest, sip_dtmf, meet_choices, meet_deadline
         from operator_os.google_calendar import (
             calendar_configured,
-            ensure_us_dial_in,
             resolve_meeting_to_join,
         )
 
@@ -876,12 +882,12 @@ def run_loop(
             audio.speak("Calendar is not linked. Run calendar auth on the Pi.", wait=False)
             expect_service_done = True
             return False
-        if not _meet_phone_ready() and not _meet_desktop_ready():
+        if not _meet_can_join():
             target = meet_join_target()
             if target == "desktop":
                 msg = "Your Mac is not connected."
             elif target == "auto":
-                msg = "Your Mac is not connected, and outside line is not configured."
+                msg = "No Meet station is available."
             else:
                 msg = "Outside line is not configured."
             audio.speak(msg, wait=False)
@@ -902,17 +908,7 @@ def run_loop(
         finally:
             audio.stop()
         if decision.meeting is not None:
-            if _meet_should_open_desktop():
-                if _arm_meet_desktop(decision.meeting, wait=False):
-                    return False
-                if meet_join_target() == "desktop":
-                    return False
-            if not _meet_phone_ready():
-                audio.speak("Outside line is not configured.", wait=False)
-                expect_service_done = True
-                return False
-            _arm_meet_call(ensure_us_dial_in(decision.meeting))
-            return True
+            return _join_meeting(decision.meeting, wait=False)
         if decision.choices:
             meet_choices = list(decision.choices)
             meet_deadline = None
@@ -923,46 +919,46 @@ def run_loop(
         expect_service_done = True
         return False
 
-    def _meet_phone_ready() -> bool:
-        target = meet_join_target()
-        return target in ("phone", "auto") and sip_configured()
+    def _meet_can_join() -> bool:
+        return console_hub.has_meeting_route(mode=meet_join_target())
 
-    def _meet_desktop_ready() -> bool:
-        target = meet_join_target()
-        return target in ("desktop", "auto") and console_hub.has_desktop_client(
-            capability="open_url"
-        )
-
-    def _meet_should_open_desktop() -> bool:
-        target = meet_join_target()
-        if target == "desktop":
-            return True
-        return target == "auto" and _meet_desktop_ready()
-
-    def _arm_meet_desktop(meet, *, wait: bool) -> bool:
+    def _join_meeting(meet, *, wait: bool) -> bool:
+        """Failover open.meeting. Returns True if SIP place_call should follow."""
         nonlocal expect_service_done
-        title = meeting_title(meet)
-        delivery = console_hub.request_desktop_open_meeting(meet)
-        if not delivery.ok and delivery.reason == "no_meet_url":
+        from operator_os.google_calendar import ensure_us_dial_in
+
+        delivery = console_hub.request_desktop_open_meeting(
+            meet, mode=meet_join_target()
+        )
+        if delivery.ok and delivery.handler == WE302_MEET_ID:
+            _arm_meet_call(ensure_us_dial_in(meet))
+            return True
+        if delivery.ok:
+            title = meeting_title(meet)
+            audio.speak(f"Opening {title} on your Mac.", wait=wait)
+            url = (delivery.command or {}).get("payload", {}).get("url", "")
+            events.emit("desktop", value="open_meet", detail=url)
+            _status(
+                f"desktop: open meet handler={delivery.handler} {url}"
+            )
+            expect_service_done = not wait
+            return False
+        if delivery.reason == "no_meet_url":
             audio.speak("That meeting does not have a desktop link.", wait=False)
             _status("desktop: open meet skipped reason=no_meet_url")
-            expect_service_done = True
-            return False
-        if not delivery.ok:
-            audio.speak("Your Mac is not connected.", wait=False)
+        else:
+            target = meet_join_target()
+            if target == "phone":
+                audio.speak("Outside line is not configured.", wait=False)
+            else:
+                audio.speak("Unable to open the meeting.", wait=False)
             _status(
                 "desktop: open meet skipped "
                 f"reason={delivery.reason or 'unknown'} "
                 f"clients={console_hub.desktop_client_summary()}"
             )
-            expect_service_done = True
-            return False
-        audio.speak(f"Opening {title} on your Mac.", wait=wait)
-        url = (delivery.command or {}).get("payload", {}).get("url", "")
-        events.emit("desktop", value="open_meet", detail=url)
-        _status(f"desktop: open meet {url}")
-        expect_service_done = not wait
-        return True
+        expect_service_done = True
+        return False
 
     def _arm_meet_call(meet) -> None:
         nonlocal sip_dest, sip_dtmf
@@ -1461,27 +1457,15 @@ def run_loop(
                     decoder.reset()
                     n = len(meet_choices)
                     if 1 <= digit <= n:
-                        from operator_os.google_calendar import ensure_us_dial_in
-
                         meet = meet_choices[digit - 1]
                         meet_choices = []
                         meet_deadline = None
-                        if _meet_should_open_desktop():
-                            _arm_meet_desktop(meet, wait=True)
-                            apply(ctl.handle(Event("meet_cancel")))
-                        else:
-                            if not _meet_phone_ready():
-                                audio.speak("Outside line is not configured.", wait=True)
-                                apply(ctl.handle(Event("meet_cancel")))
-                                time.sleep(0.02)
-                                continue
-                            meet = ensure_us_dial_in(meet)
-                            # Speak while AudioRouter still owns the handset; SIP
-                            # seize (stop → settle → bridge → dial) follows.
-                            _arm_meet_call(meet)
+                        if _join_meeting(meet, wait=True):
                             apply(ctl.handle(Event("digit", value=digit)))
                             if sip_session is None and live_audio:
                                 apply(ctl.handle(Event("sip_done")))
+                        else:
+                            apply(ctl.handle(Event("meet_cancel")))
                     elif digit == 0:
                         meet_choices = []
                         meet_deadline = None

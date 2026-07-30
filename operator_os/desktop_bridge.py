@@ -9,24 +9,33 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
+
+from operator_os.route_priority import (
+    INTENT_NOTIFY as INTENT_NOTIFY_MESSAGES,
+    INTENT_OPEN_MEETING,
+    INTENT_OPEN_URL,
+    WE302_MEET_ID,
+    ensure_station_in_meeting_priority,
+    load_priorities,
+    save_priorities,
+)
 
 
 DESKTOP_TTL_S = 45.0
 DESKTOP_COMMAND_TYPES = {"desktop.open_url", "desktop.notify"}
+ACCEPT_ACK_STATUSES = frozenset({"accept", "ok"})
+DEFAULT_ACCEPT_TIMEOUT_S = 2.5
 
 
 class DesktopStreamSuperseded(Exception):
     """This SSE connection is no longer the active one for the client."""
 
-# Product routing keys (wire protocol stays desktop.* / open_url / notify).
-INTENT_OPEN_URL = "open.url"
-INTENT_OPEN_MEETING = "open.meeting"
-INTENT_NOTIFY_MESSAGES = "notify.messages"
 
 _ROUTE_FANOUT = "fanout"
 _ROUTE_UNICAST = "unicast"
+_ROUTE_FAILOVER = "failover"
 
 
 def desktop_token() -> str:
@@ -41,6 +50,16 @@ def desktop_client_target() -> str:
 def meet_join_target() -> str:
     raw = os.environ.get("OPERATOR_MEET_JOIN_TARGET", "phone").strip().lower()
     return raw if raw in {"phone", "desktop", "auto"} else "phone"
+
+
+def accept_timeout_s() -> float:
+    raw = os.environ.get("OPERATOR_DESKTOP_ACCEPT_TIMEOUT_S", "").strip()
+    if not raw:
+        return DEFAULT_ACCEPT_TIMEOUT_S
+    try:
+        return max(0.5, min(15.0, float(raw)))
+    except ValueError:
+        return DEFAULT_ACCEPT_TIMEOUT_S
 
 
 def _route_mode_for(command_type: str) -> str:
@@ -95,6 +114,7 @@ class DesktopDelivery:
     ok: bool
     reason: str = ""
     command: dict[str, Any] | None = None
+    handler: str = ""
 
 
 @dataclass(frozen=True)
@@ -117,6 +137,30 @@ class DesktopClient:
             "connected": self.connected,
             "last_seen_age_s": round(max(0.0, t - self.last_seen), 1),
             "last_ack": self.last_ack,
+            "kind": "desktop",
+        }
+
+
+@dataclass(frozen=True)
+class LocalStation:
+    """Plant-side station that participates in failover without SSE."""
+
+    client_id: str
+    name: str
+    capabilities: tuple[str, ...]
+    eligible: Callable[[], bool] = field(default=lambda: True)
+
+    def public_dict(self) -> dict[str, Any]:
+        online = bool(self.eligible())
+        return {
+            "client_id": self.client_id,
+            "name": self.name,
+            "capabilities": list(self.capabilities),
+            "online": online,
+            "connected": online,
+            "last_seen_age_s": 0.0,
+            "last_ack": None,
+            "kind": "local",
         }
 
 
@@ -125,6 +169,7 @@ class DesktopRegistry:
     _clients: dict[str, DesktopClient] = field(default_factory=dict, init=False)
     _queues: dict[str, queue.Queue[dict[str, Any]]] = field(default_factory=dict, init=False)
     _conn_gen: dict[str, int] = field(default_factory=dict, init=False)
+    _ack_waiters: dict[str, queue.Queue[str]] = field(default_factory=dict, init=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
 
     def register(self, client_id: str, name: str, capabilities: list[str]) -> dict[str, Any]:
@@ -233,9 +278,7 @@ class DesktopRegistry:
         mode = route or _route_mode_for(command_type)
         if mode not in {_ROUTE_FANOUT, _ROUTE_UNICAST}:
             raise ValueError(f"unsupported route mode: {mode}")
-        clean_payload = dict(payload)
-        if command_type == "desktop.open_url":
-            clean_payload["url"] = validate_open_url(str(clean_payload.get("url") or ""))
+        clean_payload = self._clean_payload(command_type, payload)
         cap = _capability_for(command_type)
         targets = self._select_targets(capability=cap, target_id=target_id, mode=mode)
         if not targets:
@@ -243,17 +286,64 @@ class DesktopRegistry:
         created_at = time.time()
         first: dict[str, Any] | None = None
         for cid in targets:
-            cmd = {
-                "id": secrets.token_urlsafe(12),
-                "type": command_type,
-                "payload": clean_payload,
-                "created_at": created_at,
-            }
+            cmd = self._make_command(command_type, clean_payload, created_at=created_at)
             q = self._queues.setdefault(cid, queue.Queue(maxsize=100))
             _put_drop_oldest(q, cmd)
             if first is None:
                 first = dict(cmd)
         return first
+
+    def enqueue_one(
+        self, client_id: str, command_type: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Queue a command to exactly one client (failover hop)."""
+        if command_type not in DESKTOP_COMMAND_TYPES:
+            raise ValueError(f"unsupported desktop command: {command_type}")
+        cid = _clean_id(client_id)
+        if not cid:
+            raise ValueError("client_id required")
+        clean_payload = self._clean_payload(command_type, payload)
+        cmd = self._make_command(command_type, clean_payload)
+        with self._lock:
+            if cid not in self._clients:
+                raise ValueError("client is not registered")
+            q = self._queues.setdefault(cid, queue.Queue(maxsize=100))
+        _put_drop_oldest(q, cmd)
+        return dict(cmd)
+
+    def wait_ack(self, command_id: str, timeout_s: float) -> str:
+        """Block until ack for command_id, or return ``timeout``."""
+        cid = str(command_id or "").strip()
+        if not cid:
+            return "timeout"
+        waiter: queue.Queue[str] = queue.Queue(maxsize=1)
+        with self._lock:
+            self._ack_waiters[cid] = waiter
+        try:
+            return waiter.get(timeout=max(0.0, timeout_s))
+        except queue.Empty:
+            return "timeout"
+        finally:
+            with self._lock:
+                self._ack_waiters.pop(cid, None)
+
+    @staticmethod
+    def _clean_payload(command_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        clean_payload = dict(payload)
+        if command_type == "desktop.open_url":
+            clean_payload["url"] = validate_open_url(str(clean_payload.get("url") or ""))
+        return clean_payload
+
+    @staticmethod
+    def _make_command(
+        command_type: str, payload: dict[str, Any], *, created_at: float | None = None
+    ) -> dict[str, Any]:
+        return {
+            "id": secrets.token_urlsafe(12),
+            "type": command_type,
+            "payload": payload,
+            "created_at": time.time() if created_at is None else created_at,
+        }
 
     def next_command(
         self,
@@ -290,23 +380,32 @@ class DesktopRegistry:
 
     def ack(self, client_id: str, command_id: str, status: str, message: str = "") -> None:
         cid = _clean_id(client_id)
+        cmd_id = str(command_id or "")[:80]
+        status_s = str(status or "")[:24]
         with self._lock:
             client = self._clients.get(cid)
             if client is None:
-                return
-            self._clients[cid] = DesktopClient(
-                client_id=client.client_id,
-                name=client.name,
-                capabilities=client.capabilities,
-                last_seen=time.monotonic(),
-                connected=client.connected,
-                last_ack={
-                    "command_id": str(command_id or "")[:80],
-                    "status": str(status or "")[:24],
-                    "message": str(message or "")[:160],
-                    "at": time.time(),
-                },
-            )
+                waiter = self._ack_waiters.get(cmd_id)
+            else:
+                self._clients[cid] = DesktopClient(
+                    client_id=client.client_id,
+                    name=client.name,
+                    capabilities=client.capabilities,
+                    last_seen=time.monotonic(),
+                    connected=client.connected,
+                    last_ack={
+                        "command_id": cmd_id,
+                        "status": status_s,
+                        "message": str(message or "")[:160],
+                        "at": time.time(),
+                    },
+                )
+                waiter = self._ack_waiters.get(cmd_id)
+        if waiter is not None and cmd_id:
+            try:
+                waiter.put_nowait(status_s)
+            except queue.Full:
+                pass
 
     def _online_capable(self, *, capability: str) -> list[str]:
         """Capable online clients, sorted by client_id for stable unicast fallback."""
@@ -384,11 +483,44 @@ class DesktopBridge:
     """
 
     registry: DesktopRegistry = field(default_factory=DesktopRegistry)
+    _locals: dict[str, LocalStation] = field(default_factory=dict, init=False)
+    _priorities: dict[str, list[str]] = field(default_factory=load_priorities, init=False)
+    _prio_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+
+    def register_local(
+        self,
+        client_id: str,
+        name: str,
+        capabilities: list[str],
+        *,
+        eligible: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        cid = _clean_id(client_id)
+        if not cid:
+            raise ValueError("client_id required")
+        caps = tuple(_clean_cap(c) for c in capabilities if _clean_cap(c))
+        station = LocalStation(
+            client_id=cid,
+            name=(name or cid).strip()[:80],
+            capabilities=caps,
+            eligible=eligible or (lambda: True),
+        )
+        self._locals[cid] = station
+        return station.public_dict()
 
     def register_client(
         self, client_id: str, name: str, capabilities: list[str]
     ) -> dict[str, Any]:
-        return self.registry.register(client_id, name, capabilities)
+        client = self.registry.register(client_id, name, capabilities)
+        caps = set(client.get("capabilities") or [])
+        if "open_url" in caps:
+            with self._prio_lock:
+                if ensure_station_in_meeting_priority(client["client_id"], self._priorities):
+                    try:
+                        save_priorities(self._priorities)
+                    except OSError:
+                        pass
+        return client
 
     def connect_client(self, client_id: str) -> tuple[dict[str, Any], int]:
         return self.registry.connect(client_id)
@@ -413,7 +545,9 @@ class DesktopBridge:
         self.registry.ack(client_id, command_id, status, message)
 
     def clients(self) -> list[dict[str, Any]]:
-        return self.registry.clients()
+        remotes = self.registry.clients()
+        locals_ = [s.public_dict() for s in sorted(self._locals.values(), key=lambda s: s.client_id)]
+        return remotes + locals_
 
     def client_summary(self) -> str:
         clients = self.clients()
@@ -423,15 +557,43 @@ class DesktopBridge:
         for client in clients:
             state = "online" if client.get("online") else "offline"
             caps = ",".join(client.get("capabilities") or []) or "-"
-            parts.append(f"{client.get('client_id')}:{state}:{caps}")
+            kind = client.get("kind") or "desktop"
+            parts.append(f"{client.get('client_id')}:{state}:{caps}:{kind}")
         return "; ".join(parts)
 
     def has_client(self, *, capability: str | None = None, target_id: str = "") -> bool:
-        """True if any capable online client exists (preferred is delivery-only)."""
+        """True if any capable online desktop client exists (locals excluded)."""
         return self.registry.has_online_client(
             capability=capability,
             target_id=_clean_id(target_id),
         )
+
+    def has_meeting_route(self, *, mode: str | None = None) -> bool:
+        join = mode or meet_join_target()
+        return bool(self._meeting_candidates(mode=join))
+
+    def get_priorities(self) -> dict[str, list[str]]:
+        with self._prio_lock:
+            return {k: list(v) for k, v in self._priorities.items()}
+
+    def set_priorities(self, priorities: dict[str, Any]) -> dict[str, list[str]]:
+        saved = save_priorities(priorities)
+        with self._prio_lock:
+            self._priorities = {k: list(v) for k, v in saved.items()}
+            return {k: list(v) for k, v in self._priorities.items()}
+
+    def routing_snapshot(self) -> dict[str, Any]:
+        return {
+            "priorities": self.get_priorities(),
+            "stations": self.clients(),
+            "policies": {
+                INTENT_OPEN_MEETING: _ROUTE_FAILOVER,
+                INTENT_OPEN_URL: _ROUTE_UNICAST,
+                INTENT_NOTIFY_MESSAGES: _ROUTE_FANOUT,
+            },
+            "meet_join_target": meet_join_target(),
+            "accept_timeout_s": accept_timeout_s(),
+        }
 
     def open_url(self, *, url: str, title: str = "", target_id: str = "") -> DesktopDelivery:
         return self._queue(
@@ -440,15 +602,68 @@ class DesktopBridge:
             target_id=target_id,
         )
 
-    def open_meeting(self, meeting: Any, *, target_id: str = "") -> DesktopDelivery:
+    def open_meeting(
+        self,
+        meeting: Any,
+        *,
+        mode: str | None = None,
+        target_id: str = "",
+        accept_timeout: float | None = None,
+    ) -> DesktopDelivery:
+        """Failover open.meeting: try priority order until accept or local SIP.
+
+        ``mode`` mirrors OPERATOR_MEET_JOIN_TARGET: phone / desktop / auto.
+        """
+        join = mode or meet_join_target()
         url = meet_video_url(meeting)
-        if not url:
+        title = meeting_title(meeting)
+        timeout = accept_timeout if accept_timeout is not None else accept_timeout_s()
+        tid = _clean_id(target_id)
+        candidates = self._meeting_candidates(mode=join, target_id=tid)
+        if not candidates:
+            return DesktopDelivery(False, reason="no_client")
+
+        last_reason = "no_client"
+        for kind, cid in candidates:
+            if kind == "local":
+                station = self._locals.get(cid)
+                if station is None or not station.eligible():
+                    last_reason = "local_unavailable"
+                    continue
+                return DesktopDelivery(
+                    True,
+                    handler=cid,
+                    command={
+                        "id": f"local-{cid}",
+                        "type": "local.meet_sip",
+                        "payload": {
+                            "title": title,
+                            "e164": str(getattr(meeting, "e164", "") or ""),
+                            "conference_id": str(
+                                getattr(meeting, "conference_id", "") or ""
+                            ),
+                        },
+                    },
+                )
+            if not url:
+                last_reason = "no_meet_url"
+                continue
+            try:
+                cmd = self.registry.enqueue_one(
+                    cid,
+                    "desktop.open_url",
+                    {"url": url, "title": title},
+                )
+            except ValueError as e:
+                last_reason = str(e)
+                continue
+            status = self.registry.wait_ack(cmd["id"], timeout)
+            if status in ACCEPT_ACK_STATUSES:
+                return DesktopDelivery(True, handler=cid, command=cmd)
+            last_reason = status or "rejected"
+        if not url and all(k == "desktop" for k, _ in candidates):
             return DesktopDelivery(False, reason="no_meet_url")
-        return self._queue(
-            "desktop.open_url",
-            {"url": url, "title": meeting_title(meeting)},
-            target_id=target_id,
-        )
+        return DesktopDelivery(False, reason=last_reason)
 
     def notify(
         self,
@@ -489,6 +704,44 @@ class DesktopBridge:
     ) -> DesktopDelivery:
         return self._queue(command_type, payload, target_id=target_id)
 
+    def _meeting_candidates(
+        self, *, mode: str, target_id: str = ""
+    ) -> list[tuple[str, str]]:
+        """Return ordered (kind, client_id) hops for open.meeting failover."""
+        with self._prio_lock:
+            order = list(self._priorities.get(INTENT_OPEN_MEETING) or [])
+        online_desktop = self.registry._online_capable(capability="open_url")
+        tid = _clean_id(target_id)
+        if tid:
+            order = [tid]
+
+        # Append online desktops not listed (stable) so a new Mac still works.
+        for cid in online_desktop:
+            if cid not in order:
+                order.append(cid)
+
+        out: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for cid in order:
+            if cid in seen:
+                continue
+            seen.add(cid)
+            if cid in self._locals:
+                if mode == "desktop":
+                    continue
+                station = self._locals[cid]
+                if "open.meeting" not in station.capabilities and "open_url" not in station.capabilities:
+                    continue
+                if not station.eligible():
+                    continue
+                out.append(("local", cid))
+                continue
+            if mode == "phone":
+                continue
+            if cid in online_desktop:
+                out.append(("desktop", cid))
+        return out
+
     def _queue(
         self,
         command_type: str,
@@ -514,4 +767,13 @@ class DesktopBridge:
             return DesktopDelivery(False, reason=str(e))
         if cmd is None:
             return DesktopDelivery(False, reason="no_client")
-        return DesktopDelivery(True, command=cmd)
+        handler = ""
+        if mode == _ROUTE_UNICAST:
+            # Best-effort: preferred or first online.
+            targets = self.registry._select_targets(
+                capability=_capability_for(command_type),
+                target_id=effective_target,
+                mode=mode,
+            )
+            handler = targets[0] if targets else ""
+        return DesktopDelivery(True, command=cmd, handler=handler)

@@ -495,7 +495,7 @@ def _handle_sse(
     if event != "command":
         return
     command_id = str(payload.get("id") or "")
-    status = "ok"
+    status = "accept"
     message = ""
     try:
         message = _execute_command(payload, notify_mode=notify_mode)

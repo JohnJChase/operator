@@ -253,12 +253,20 @@ final class BridgeClient: ObservableObject {
         let kind = payload["type"] as? String ?? "?"
         appendLog("command \(kind) id=\(commandID)")
 
-        var status = "ok"
+        var status = "accept"
         var message = ""
         do {
             message = try await execute(payload, acceptOpenURL: acceptOpenURL)
             lastEvent = message
             appendLog(message)
+        } catch let error as CommandError {
+            if case .rejected = error {
+                status = "reject"
+            } else {
+                status = "error"
+            }
+            message = error.localizedDescription
+            appendLog("command \(status): \(message)")
         } catch {
             status = "error"
             message = error.localizedDescription
@@ -284,7 +292,7 @@ final class BridgeClient: ObservableObject {
         switch kind {
         case "desktop.open_url":
             guard acceptOpenURL else {
-                return "ignored open_url (Meet off on this Mac)"
+                throw CommandError.rejected("Meet off on this Mac")
             }
             let raw = payload["url"] as? String ?? ""
             let url = try DesktopCommands.validateOpenURL(raw)

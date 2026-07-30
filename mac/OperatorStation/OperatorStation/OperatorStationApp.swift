@@ -42,6 +42,11 @@ struct OperatorStationApp: App {
             PlaceCallView(settings: model.settings)
         }
         .defaultSize(width: 440, height: 360)
+
+        Window("Meet Priority", id: "routing") {
+            RoutingView(settings: model.settings)
+        }
+        .defaultSize(width: 520, height: 420)
     }
 }
 
@@ -149,6 +154,7 @@ private struct MenuBarContent: View {
         Button("Inbox") { openWindow(id: "inbox") }
         Button("Directory") { openWindow(id: "directory") }
         Button("Place call…") { openWindow(id: "place-call") }
+        Button("Meet priority…") { openWindow(id: "routing") }
 
         Divider()
 

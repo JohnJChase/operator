@@ -95,8 +95,29 @@ class ConsoleHub:
     def has_desktop_client(self, *, capability: str | None = None) -> bool:
         return self.desktop.has_client(capability=capability)
 
+    def has_meeting_route(self, *, mode: str | None = None) -> bool:
+        return self.desktop.has_meeting_route(mode=mode)
+
     def desktop_client_summary(self) -> str:
         return self.desktop.client_summary()
+
+    def register_local_station(
+        self,
+        client_id: str,
+        name: str,
+        capabilities: list[str],
+        *,
+        eligible: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        return self.desktop.register_local(
+            client_id, name, capabilities, eligible=eligible
+        )
+
+    def routing_snapshot(self) -> dict[str, Any]:
+        return self.desktop.routing_snapshot()
+
+    def set_routing_priorities(self, priorities: dict[str, Any]) -> dict[str, list[str]]:
+        return self.desktop.set_priorities(priorities)
 
     def register_desktop_client(
         self, client_id: str, name: str, capabilities: list[str]
@@ -137,8 +158,10 @@ class ConsoleHub:
     ) -> DesktopDelivery:
         return self.desktop.open_url(url=url, title=title, target_id=target_id)
 
-    def request_desktop_open_meeting(self, meeting: Any) -> DesktopDelivery:
-        return self.desktop.open_meeting(meeting)
+    def request_desktop_open_meeting(
+        self, meeting: Any, *, mode: str | None = None
+    ) -> DesktopDelivery:
+        return self.desktop.open_meeting(meeting, mode=mode)
 
     def request_desktop_notify(
         self,
