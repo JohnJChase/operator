@@ -45,6 +45,11 @@ Feature code should not build raw `desktop.*` payloads. Add a named method to
 `DesktopBridge` first, add one small test, then call that method from the
 feature path.
 
+Current Rev A routing is transitional. The bridge may enqueue a command to every
+online client with the matching capability. The exchange roadmap Phase 1 will
+split this deliberately: message notifications fan out, while meeting/URL opens
+route to one preferred capable client.
+
 ## Pi setup
 
 Set these in the Pi `.env`:
@@ -182,7 +187,8 @@ native notification and acknowledges the command back to the Pi.
 
 Good next increments:
 
-- Mac inbox window backed by the Pi `/api/inbox` data.
-- Mac "call this contact" request that rings the WE302 first, then places the
-  call after pickup.
-- Tiny SwiftUI menu bar wrapper around the same `operator-os mac-client` logic.
+- Phase 1: explicit fan-out vs unicast routing in `DesktopBridge`.
+- Phase 2: Mac inbox window backed by the Pi inbox API.
+- Phase 5: Mac "call this contact" request that rings the WE302 first, then
+  places the call after pickup.
+- Phase 6: tiny SwiftUI menu bar wrapper around the same exchange protocol.

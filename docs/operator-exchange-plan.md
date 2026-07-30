@@ -72,6 +72,10 @@ Today the repo already has the first draft of this model:
 This should be treated as the seed of the exchange client protocol, not a
 throwaway hack.
 
+Phase 0 of this roadmap is therefore complete in code. Keep using live smoke
+tests for confidence, but do not treat "stabilize the current Mac bridge" as a
+new architecture project.
+
 ## Terms
 
 | Term | Meaning |
@@ -104,6 +108,12 @@ voice.handset
 dial.rotary
 ```
 
+### Wire vs Product Vocabulary
+
+Product vocabulary is allowed to become semantic before the wire protocol does.
+Do not rename the current Mac wire protocol until there is a real second client
+or a Mac V2 migration that needs it.
+
 Current Mac bridge names can map internally:
 
 ```text
@@ -113,12 +123,20 @@ desktop.open_url -> transport command for Mac client
 desktop.notify   -> transport command for Mac client
 ```
 
-Do not rename everything immediately if it creates churn. Add the exchange
-vocabulary at the boundary first, then migrate call sites gradually.
+For Phase 1, keep:
 
-## Extension Registration
+- `/api/desktop/*`
+- SSE event name `command`
+- Mac registration capabilities `open_url` and `notify`
+- transport commands `desktop.open_url` and `desktop.notify`
 
-An extension registers with a stable id, kind, display name, and capabilities.
+Use semantic names such as `open.meeting` and `notify.messages` as internal
+product/routing names first. Wire renames are deferred.
+
+## Future Extension Registration
+
+When the extension protocol exists, an extension will register with a stable id,
+kind, display name, and capabilities.
 
 ```json
 {
@@ -134,7 +152,8 @@ An extension registers with a stable id, kind, display name, and capabilities.
 }
 ```
 
-The WE302 should eventually be represented too:
+The WE302 should eventually be represented too, but this is a future sketch,
+not Phase 1 work:
 
 ```json
 {
@@ -152,7 +171,11 @@ The WE302 should eventually be represented too:
 
 ## Protocol Shape
 
-Keep the existing SSE plus POST shape.
+Keep the existing SSE plus POST shape. The current Mac client should keep using
+the `/api/desktop/*` endpoints until a non-Mac client or Mac V2 forces a real
+extension protocol.
+
+Future extension API shape:
 
 ```text
 Extension -> Exchange
@@ -167,17 +190,27 @@ Exchange -> Extension over SSE
   event: keepalive
 ```
 
-The existing `/api/desktop/*` endpoints can remain as compatibility wrappers
-until the extension endpoints exist and the Mac client has migrated.
+When `/api/extensions/*` exists, the existing `/api/desktop/*` endpoints can
+remain as compatibility wrappers until the Mac client has migrated.
+
+For inbox changes, SSE should carry a thin `inbox.changed` style event. Full
+message and voicemail data should come from the inbox API. Bounded notification
+previews are acceptable for user-visible notifications.
 
 ## Routing Rules
 
-Routing must be boring and explicit.
+Routing must be boring and explicit. Today, the desktop bridge is transitional:
+commands can be enqueued to every online client with the required capability.
+Phase 1 must make the policy explicit before multiple clients are treated as a
+normal operating mode.
 
-1. Prefer explicitly configured extension when present and online.
-2. Otherwise route to the first online extension with the required capability.
-3. For notifications, route to all online extensions with the required
-   capability unless the intent says otherwise.
+Target routing policies:
+
+1. Notifications fan out to all online extensions with the required capability.
+2. Meeting/URL opens are unicast: prefer explicitly configured extension when
+   present and online; otherwise route to the first online capable extension.
+3. Call requests are accepted from one extension and routed through the phone
+   chart, not directly to the SIP trunk.
 4. If no route exists, log a skipped delivery with the reason and current
    extension summary.
 5. Never silently drop a user-visible intent.
@@ -185,7 +218,9 @@ Routing must be boring and explicit.
 ## Security Rules
 
 - Keep shared token auth for local LAN/Tailscale use.
-- No public ingress.
+- No public ingress for console, desktop, or future extension APIs.
+- The Telnyx SMS webhook may use Funnel or equivalent public ingress; that
+  exception does not apply to control APIs.
 - No arbitrary shell command intent.
 - Each extension request must be allowlisted and validated.
 - Calls and SMS sends need confirmation or an explicit trusted UI action.
@@ -223,12 +258,13 @@ Do not add it until there is a real setting to save.
 
 ## Phase Plan
 
-### Phase 0: Stabilize Current Bridge
+### Phase 0: Stabilize Current Bridge (Complete)
 
 Goal: make sure the existing Mac bridge is reliable and observable.
 
-Work:
+Status:
 
+- complete in current code
 - keep `DesktopBridge` as the single Pi-side boundary
 - keep diagnostic logs for skipped delivery
 - keep Mac client console logging for received commands
@@ -248,24 +284,32 @@ uv run pytest tests/test_desktop_bridge.py tests/test_mac_client.py
 uv run ruff check .
 ```
 
-### Phase 1: Introduce Exchange Extension Vocabulary
+### Phase 1: Make Routing Policy Explicit In The Current Bridge
 
-Goal: make the protocol talk about extensions, not desktops.
+Goal: keep the current Mac bridge working while making routing rules explicit
+enough for multiple clients.
 
 Work:
 
-- add `operator_os/extensions.py` or evolve `desktop_bridge.py` carefully
-- define `ExtensionClient`, `ExtensionRegistry`, `ExtensionDelivery`
-- add capability constants or simple string helpers
-- keep `DesktopBridge` as a thin compatibility facade if that is the smallest
-  migration path
+- evolve `DesktopBridge` in place; do not create `operator_os/extensions.py`
+  unless the file truly needs to split
+- add internal product-intent to capability/transport mapping
+- keep `/api/desktop/*`, SSE `command`, Mac caps `open_url` / `notify`, and
+  transport commands `desktop.open_url` / `desktop.notify`
+- implement routing modes:
+  - notifications fan out to all capable online clients
+  - meeting/URL opens go to configured preferred client, else first capable
+    online client
+- add multi-client tests proving fan-out vs unicast
+- explicitly defer `/api/extensions/*`, SSE rename to `intent`, and WE302
+  registry entry
 
 Acceptance:
 
 - current Mac client still works
-- tests show routing by capability
+- tests show routing by capability and routing mode
 - no feature code builds raw transport payloads
-- docs show extension registration shape
+- docs show extension registration shape as future vocabulary, not current wire
 
 Checks:
 
@@ -274,32 +318,7 @@ uv run pytest tests/test_desktop_bridge.py tests/test_console.py
 uv run ruff check .
 ```
 
-### Phase 2: Extension Intent and Request API
-
-Goal: formalize exchange-to-extension and extension-to-exchange messages.
-
-Work:
-
-- add intent names for:
-  - `notify.messages`
-  - `notify.voicemail`
-  - `open.meeting`
-  - `inbox.changed`
-- add request names for:
-  - `call.request`
-  - `message.reply.request`
-  - `voicemail.play.request`
-- add validation for each request shape
-- add `/api/extensions/request`
-
-Acceptance:
-
-- Mac can request a harmless test action through the new request endpoint
-- invalid request names are rejected
-- arbitrary shell execution is impossible by construction
-- one focused test covers each non-trivial request validator
-
-### Phase 3: Inbox Service API
+### Phase 2: Inbox Service API
 
 Goal: make inbox and voicemail usable by non-browser clients without duplicating
 console code.
@@ -325,9 +344,36 @@ Acceptance:
 - voicemail audio URL works from Mac
 - tests use temp SQLite DB
 
+### Phase 3: Minimal Extension Request API
+
+Goal: let a client ask the exchange for allowlisted work only when the Mac needs
+to call back into the Pi.
+
+Work:
+
+- define request names only for real features being built next
+- likely first requests:
+  - `message.reply.request`
+  - `voicemail.play.request`
+- defer `call.request` until Phase 5 so outgoing calls are chart-first from the
+  beginning
+- add validation for each request shape
+- reuse current desktop POST plumbing if that is smallest
+- add `/api/extensions/request` only when the compatibility path becomes more
+  confusing than helpful
+
+Acceptance:
+
+- Mac can request a harmless test action or one real validated action
+- invalid request names are rejected
+- arbitrary shell execution is impossible by construction
+- one focused test covers each non-trivial request validator
+
 ### Phase 4: Mac Companion CLI V2
 
-Goal: prove the extension model before building a real app.
+Goal: prove richer Mac station behavior before building a real app. This phase
+does not require a new wire protocol; use the current desktop bridge plus the
+new inbox APIs unless changing protocol is clearly smaller.
 
 Work:
 
@@ -336,17 +382,18 @@ Work:
   - list inbox
   - show latest messages
   - play voicemail through local default player
-  - request outgoing call
 - keep native dependencies at zero
+- leave outgoing-call requests to Phase 5
 
 Acceptance:
 
 - Mac can list inbox from Pi
-- Mac can request outgoing call by number
-- Pi rings WE302 for pickup before placing the SIP call
-- no direct Mac-to-Telnyx call path
+- Mac can show latest messages and voicemail metadata
+- Mac can play voicemail through an existing platform player or print the audio
+  URL if local playback is not worth the code yet
+- no new native dependencies are required
 
-### Phase 5: Outgoing Call Request Flow
+### Phase 5: Chart-First Outgoing Call Request Flow
 
 Goal: make the Mac a station that can ask the exchange to place a call while the
 WE302 keeps the physical ritual.
@@ -364,10 +411,13 @@ Hangup ends call
 
 Work:
 
-- add pending outgoing-call request state in `ConsoleHub` or a dedicated
-  exchange object
-- add chart event only if the phone state machine needs it
+- add a real state-machine event/state for outgoing pickup ringing, following
+  the `SMS_ALERTING` / `INCOMING_RINGING` pattern
+- add the corresponding chart edge(s) and plant patch before live behavior
+- extend the existing `request_place_call` / `take_place_call` path where
+  possible instead of adding a second place-call queue
 - do not bypass the existing SIP place-call path
+- forbid on-hook SIP dialing without the outgoing ringing state
 
 Acceptance:
 
@@ -445,16 +495,18 @@ Acceptance:
 
 ## Immediate Next Build
 
-The next useful coding increment is Phase 1, but keep it small:
+The next useful coding increment is revised Phase 1:
 
-1. Add extension vocabulary types while keeping existing desktop endpoints.
-2. Add capability-based notification routing.
+1. Keep the current desktop wire protocol unchanged.
+2. Add routing modes inside `DesktopBridge`:
+   - notification fan-out
+   - meeting/URL unicast
 3. Keep current Mac client working unchanged.
-4. Add tests proving multiple clients can register and only capable clients
-   receive each intent.
+4. Add multi-client tests proving notify fan-out vs meet unicast.
+5. Add skipped-delivery logging for both routing modes if missing.
 
-Do not build the native Mac app yet. First prove the exchange protocol with the
-existing Python client.
+Do not build the native Mac app yet. First prove the exchange routing model with
+the existing Python client.
 
 ## Non-Goals For Now
 
