@@ -135,6 +135,25 @@ For connection debugging, run the Mac client with keepalive logging:
 OPERATOR_DESKTOP_VERBOSE=1 just mac-client
 ```
 
+For Mac-side status and inbox browsing, also set the console password already
+used by the web UI:
+
+```bash
+export OPERATOR_CONSOLE_PASSWORD=replace-with-console-password
+just mac-status
+just mac-inbox
+```
+
+To play a voicemail from the Mac:
+
+```bash
+just mac-inbox --play-vm 3
+```
+
+These desktop commands deliberately use the current console inbox API for now.
+When the Pi-side exchange API grows a desktop-token inbox endpoint, the Mac CLI
+can swap transports without changing the user-facing commands.
+
 If the WE302 double-rings but the Mac client logs no `notified:` line, check the
 Pi log. New SMS delivery attempts log either:
 
@@ -188,7 +207,8 @@ native notification and acknowledges the command back to the Pi.
 Good next increments:
 
 - Phase 1: explicit fan-out vs unicast routing in `DesktopBridge`.
-- Phase 2: Mac inbox window backed by the Pi inbox API.
+- Phase 2: desktop-token inbox API compatibility for the existing `mac-inbox`
+  command.
 - Phase 5: Mac "call this contact" request that rings the WE302 first, then
   places the call after pickup.
 - Phase 6: tiny SwiftUI menu bar wrapper around the same exchange protocol.

@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import argparse
+from http.cookiejar import CookieJar
 import json
 import os
+from pathlib import Path
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin
 
 from operator_os.desktop_bridge import validate_open_url
 
@@ -82,6 +86,240 @@ def run_mac_client(argv: list[str] | None = None) -> int:
             if args.once:
                 return 1
             time.sleep(2.0)
+
+
+def run_mac_status(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="operator-os mac-status",
+        description="Show this Mac's view of the Operator Pi.",
+    )
+    _add_console_args(parser)
+    parser.add_argument("--json", action="store_true", help="print raw status JSON")
+    args = parser.parse_args(argv)
+
+    if not args.console_password.strip():
+        print("OPERATOR_CONSOLE_PASSWORD is required.", file=sys.stderr)
+        return 2
+    base = args.pi_url.rstrip("/")
+    try:
+        opener = _console_login(base, args.console_password)
+        status = _get_json(opener, base, "/api/status")
+    except Exception as e:
+        print(f"mac-status: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(status, indent=2) if args.json else _format_status(status))
+    return 0
+
+
+def run_mac_inbox(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="operator-os mac-inbox",
+        description="List Operator SMS and voicemail from this Mac.",
+    )
+    _add_console_args(parser)
+    parser.add_argument("--limit", type=int, default=10, help="items to show per section")
+    parser.add_argument("--json", action="store_true", help="print raw inbox JSON")
+    parser.add_argument("--play-vm", type=int, default=0, help="download and play voicemail id")
+    args = parser.parse_args(argv)
+
+    if not args.console_password.strip():
+        print("OPERATOR_CONSOLE_PASSWORD is required.", file=sys.stderr)
+        return 2
+    base = args.pi_url.rstrip("/")
+    try:
+        opener = _console_login(base, args.console_password)
+        inbox = _get_json(opener, base, "/api/inbox")
+        if args.json:
+            print(json.dumps(inbox, indent=2))
+        else:
+            print(_format_inbox(inbox, base=base, limit=args.limit))
+        if args.play_vm:
+            _play_voicemail(opener, base, args.play_vm, inbox)
+    except Exception as e:
+        print(f"mac-inbox: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _add_console_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--pi-url",
+        default=os.environ.get("OPERATOR_PI_URL", "http://operator.local:8788"),
+        help="Pi console URL, e.g. http://operator.local:8788",
+    )
+    parser.add_argument(
+        "--console-password",
+        default=os.environ.get("OPERATOR_CONSOLE_PASSWORD", ""),
+        help="shared OPERATOR_CONSOLE_PASSWORD",
+    )
+
+
+def _console_login(base: str, password: str) -> urllib.request.OpenerDirector:
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
+    body = json.dumps({"password": password}).encode()
+    req = urllib.request.Request(
+        base + "/api/login",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with opener.open(req, timeout=10) as resp:
+            json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:240]
+        raise RuntimeError(f"HTTP {e.code}: {detail}") from e
+    return opener
+
+
+def _get_json(
+    opener: urllib.request.OpenerDirector,
+    base: str,
+    path: str,
+) -> dict[str, Any]:
+    req = urllib.request.Request(base + path, method="GET")
+    try:
+        with opener.open(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:240]
+        raise RuntimeError(f"HTTP {e.code}: {detail}") from e
+    return data if isinstance(data, dict) else {}
+
+
+def _get_bytes(opener: urllib.request.OpenerDirector, url: str) -> bytes:
+    try:
+        with opener.open(urllib.request.Request(url, method="GET"), timeout=20) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:240]
+        raise RuntimeError(f"HTTP {e.code}: {detail}") from e
+
+
+def _format_status(status: dict[str, Any]) -> str:
+    readiness = status.get("readiness") if isinstance(status.get("readiness"), dict) else {}
+    clients = status.get("desktop_clients") if isinstance(status.get("desktop_clients"), list) else []
+    lines = [
+        "Operator status",
+        f"  state: {status.get('state') or 'unknown'}",
+        f"  readiness: {readiness.get('level') or 'unknown'}",
+        f"  last digit: {status.get('last_digit') if status.get('last_digit') is not None else '-'}",
+        f"  desktop clients: {len(clients)}",
+    ]
+    for client in clients:
+        if not isinstance(client, dict):
+            continue
+        caps = ",".join(client.get("capabilities") or [])
+        online = "online" if client.get("online") else "offline"
+        lines.append(f"    {client.get('client_id')}: {online} {caps}".rstrip())
+    return "\n".join(lines)
+
+
+def _format_inbox(payload: dict[str, Any], *, base: str, limit: int = 10) -> str:
+    sms = payload.get("sms") if isinstance(payload.get("sms"), list) else []
+    voicemails = (
+        payload.get("voicemails") if isinstance(payload.get("voicemails"), list) else []
+    )
+    limit = max(1, int(limit))
+    lines = [
+        f"Inbox: {int(payload.get('waiting') or 0)} waiting",
+        "SMS",
+    ]
+    if not sms:
+        lines.append("  none")
+    for item in sms[:limit]:
+        if not isinstance(item, dict):
+            continue
+        lines.append(_format_sms(item))
+
+    lines.append("Voicemail")
+    if not voicemails:
+        lines.append("  none")
+    for item in voicemails[:limit]:
+        if not isinstance(item, dict):
+            continue
+        lines.append(_format_voicemail(item, base=base))
+    return "\n".join(lines)
+
+
+def _format_sms(item: dict[str, Any]) -> str:
+    direction = str(item.get("direction") or "")
+    if direction == "out":
+        who = item.get("to_name") or item.get("to_e164") or "unknown"
+        prefix = "OUT"
+        party = f"to {who}"
+    else:
+        who = item.get("from_name") or item.get("from_e164") or "unknown"
+        prefix = "NEW" if item.get("heard_at") is None else "IN"
+        party = f"from {who}"
+    body = _compact(str(item.get("body") or ""), 96)
+    return f"  #{item.get('id')} {prefix} {_format_time(item.get('created_at'))} {party}: {body}"
+
+
+def _format_voicemail(item: dict[str, Any], *, base: str) -> str:
+    who = item.get("from_name") or item.get("from_e164") or "unknown"
+    prefix = "NEW" if item.get("heard_at") is None else "OLD"
+    dur = _format_duration(item.get("duration_s"))
+    audio_url = _absolute_url(base, str(item.get("audio_url") or ""))
+    return (
+        f"  #{item.get('id')} {prefix} {_format_time(item.get('created_at'))} "
+        f"from {who} ({dur}) {audio_url}"
+    )
+
+
+def _play_voicemail(
+    opener: urllib.request.OpenerDirector,
+    base: str,
+    voicemail_id: int,
+    inbox: dict[str, Any],
+) -> None:
+    voicemails = inbox.get("voicemails") if isinstance(inbox.get("voicemails"), list) else []
+    vm = next(
+        (
+            v
+            for v in voicemails
+            if isinstance(v, dict) and int(v.get("id") or 0) == voicemail_id
+        ),
+        None,
+    )
+    if vm is None:
+        raise RuntimeError(f"voicemail {voicemail_id} not found in inbox")
+    url = _absolute_url(base, str(vm.get("audio_url") or ""))
+    if sys.platform != "darwin":
+        print(f"mac-inbox: voicemail audio: {url}")
+        return
+    data = _get_bytes(opener, url)
+    path = Path(tempfile.gettempdir()) / f"operator-voicemail-{voicemail_id}.wav"
+    path.write_bytes(data)
+    subprocess.run(["open", str(path)], check=True)
+    print(f"mac-inbox: opened voicemail {voicemail_id}: {path}")
+
+
+def _absolute_url(base: str, path: str) -> str:
+    return urljoin(base.rstrip("/") + "/", path)
+
+
+def _compact(value: str, limit: int) -> str:
+    text = " ".join(value.split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _format_time(value: Any) -> str:
+    try:
+        return datetime.fromtimestamp(float(value)).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OSError):
+        return "-"
+
+
+def _format_duration(value: Any) -> str:
+    try:
+        seconds = max(0, int(round(float(value))))
+    except (TypeError, ValueError):
+        seconds = 0
+    mins, secs = divmod(seconds, 60)
+    return f"{mins}:{secs:02d}"
 
 
 def _register(base: str, token: str, client_id: str, name: str) -> None:

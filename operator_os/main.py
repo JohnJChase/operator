@@ -87,6 +87,16 @@ def main(argv: list[str] | None = None) -> None:
     mc.add_argument("--client-id", default=None, help="stable client id")
     mc.add_argument("--name", default=None, help="display name")
     mc.add_argument("--once", action="store_true", help="connect once; do not retry")
+    ms = sub.add_parser("mac-status", help="show Pi status from this Mac")
+    ms.add_argument("--pi-url", default=None, help="Pi URL, e.g. http://operator.local:8788")
+    ms.add_argument("--console-password", default=None, help="shared OPERATOR_CONSOLE_PASSWORD")
+    ms.add_argument("--json", action="store_true", help="print raw status JSON")
+    mi = sub.add_parser("mac-inbox", help="list Operator SMS and voicemail from this Mac")
+    mi.add_argument("--pi-url", default=None, help="Pi URL, e.g. http://operator.local:8788")
+    mi.add_argument("--console-password", default=None, help="shared OPERATOR_CONSOLE_PASSWORD")
+    mi.add_argument("--limit", type=int, default=None, help="items to show per section")
+    mi.add_argument("--json", action="store_true", help="print raw inbox JSON")
+    mi.add_argument("--play-vm", type=int, default=None, help="download and play voicemail id")
     sub.add_parser("status", help="print profile and current state summary")
     sub.add_parser("chart", help="regenerate docs/state-chart.md from the FSM")
     ref = sub.add_parser("refresh", help="fetch and cache news/weather")
@@ -159,6 +169,32 @@ def main(argv: list[str] | None = None) -> None:
         if args.once:
             mac_args.append("--once")
         raise SystemExit(run_mac_client(mac_args))
+    if args.cmd == "mac-status":
+        from operator_os.mac_client import run_mac_status
+
+        mac_args = []
+        if args.pi_url is not None:
+            mac_args.extend(["--pi-url", args.pi_url])
+        if args.console_password is not None:
+            mac_args.extend(["--console-password", args.console_password])
+        if args.json:
+            mac_args.append("--json")
+        raise SystemExit(run_mac_status(mac_args))
+    if args.cmd == "mac-inbox":
+        from operator_os.mac_client import run_mac_inbox
+
+        mac_args = []
+        if args.pi_url is not None:
+            mac_args.extend(["--pi-url", args.pi_url])
+        if args.console_password is not None:
+            mac_args.extend(["--console-password", args.console_password])
+        if args.limit is not None:
+            mac_args.extend(["--limit", str(args.limit)])
+        if args.json:
+            mac_args.append("--json")
+        if args.play_vm is not None:
+            mac_args.extend(["--play-vm", str(args.play_vm)])
+        raise SystemExit(run_mac_inbox(mac_args))
     if args.cmd == "refresh":
         from operator_os.refresh import refresh_all
 
