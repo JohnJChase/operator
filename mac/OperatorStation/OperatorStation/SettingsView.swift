@@ -1,8 +1,13 @@
+import AppKit
 import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var settings: StationSettings
     @ObservedObject var bridge: BridgeClient
+
+    private var logText: String {
+        bridge.logLines.joined(separator: "\n")
+    }
 
     var body: some View {
         Form {
@@ -32,26 +37,52 @@ struct SettingsView: View {
                     .disabled(!bridge.state.isOnline)
                 }
             }
-            Section("Log") {
-                if bridge.logLines.isEmpty {
-                    Text("No events yet.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(Array(bridge.logLines.enumerated()), id: \.offset) { _, line in
-                                Text(line)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
+            Section {
+                TextEditor(text: logBinding)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 200, maxHeight: 280)
+                    .scrollContentBackground(.hidden)
+                    .padding(4)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color(nsColor: .separatorColor))
+                    )
+            } header: {
+                HStack {
+                    Text("Log")
+                    Spacer()
+                    Button("Copy") {
+                        copyLog()
                     }
-                    .frame(minHeight: 180, maxHeight: 280)
+                    .disabled(bridge.logLines.isEmpty)
+                    .help("Copy the full log to the clipboard")
                 }
+            } footer: {
+                Text("Select any range and ⌘C, or use Copy for the whole log.")
+                    .font(.caption)
             }
         }
         .padding()
-        .frame(width: 520, height: 460)
+        .frame(width: 560, height: 520)
+    }
+
+    /// Read-only binding so TextEditor stays selectable but edits don't stick.
+    private var logBinding: Binding<String> {
+        Binding(
+            get: {
+                bridge.logLines.isEmpty ? "No events yet." : logText
+            },
+            set: { _ in }
+        )
+    }
+
+    private func copyLog() {
+        let text = logText
+        guard !text.isEmpty else { return }
+        let board = NSPasteboard.general
+        board.clearContents()
+        board.setString(text, forType: .string)
     }
 }
