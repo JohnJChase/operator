@@ -144,43 +144,32 @@ final class BridgeClient: ObservableObject {
         state = .connected
         appendLog("listening")
 
-        var event = ""
-        var dataLines: [String] = []
+        var buffer = Data()
         var lastKeepaliveLog = Date.distantPast
-        for try await rawLine in bytes.lines {
+        for try await byte in bytes {
             try Task.checkCancellation()
-            // URLSession may leave a trailing \r when the peer uses CRLF; that
-            // breaks `event == "command"` / `"ready"` while keepalives still work.
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            if line.isEmpty {
+            buffer.append(byte)
+            let blocks = SSEFramer.pullBlocks(from: &buffer)
+            for block in blocks {
+                // Keepalive / comment-only blocks have no data field.
+                if let text = String(data: block, encoding: .utf8),
+                   text.split(whereSeparator: \.isNewline).allSatisfy({ $0.hasPrefix(":") || $0.isEmpty })
+                {
+                    let now = Date()
+                    if now.timeIntervalSince(lastKeepaliveLog) >= 55 {
+                        appendLog("keepalive")
+                        lastKeepaliveLog = now
+                    }
+                    continue
+                }
+                guard let parsed = SSEFramer.parseBlock(block) else { continue }
                 await handleSSE(
                     base: base,
                     token: token,
                     clientID: clientID,
-                    event: event,
-                    dataLines: dataLines
+                    event: parsed.event,
+                    dataLines: parsed.data.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
                 )
-                event = ""
-                dataLines = []
-                continue
-            }
-            if line.hasPrefix(":") {
-                let now = Date()
-                if now.timeIntervalSince(lastKeepaliveLog) >= 55 {
-                    appendLog("keepalive")
-                    lastKeepaliveLog = now
-                }
-                continue
-            }
-            if line.hasPrefix("event:") {
-                event = String(line.dropFirst("event:".count))
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-            } else if line.hasPrefix("data:") {
-                let value = String(line.dropFirst("data:".count))
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                dataLines.append(value)
-            } else {
-                appendLog("sse ignore: \(line.prefix(80))")
             }
         }
         throw BridgeError.streamEnded
