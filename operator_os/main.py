@@ -99,6 +99,16 @@ def main(argv: list[str] | None = None) -> None:
     mi.add_argument("--limit", type=int, default=None, help="items to show per section")
     mi.add_argument("--json", action="store_true", help="print raw inbox JSON")
     mi.add_argument("--play-vm", type=int, default=None, help="download and play voicemail id")
+    mcall = sub.add_parser(
+        "mac-call",
+        help="request WE302 ring then outbound SIP call",
+    )
+    mcall.add_argument("--pi-url", default=None, help="Pi URL, e.g. http://operator.local:8788")
+    mcall.add_argument("--token", default=None, help="shared OPERATOR_DESKTOP_TOKEN")
+    mcall.add_argument("--console-password", default=None, help="shared OPERATOR_CONSOLE_PASSWORD")
+    mcall.add_argument("number", nargs="?", default=None, help="E.164 or NANP number")
+    mcall.add_argument("--e164", default=None, help="E.164 or NANP number")
+    mcall.add_argument("--name", default=None, help="phonebook contact name")
     sub.add_parser("status", help="print profile and current state summary")
     sub.add_parser("chart", help="regenerate docs/state-chart.md from the FSM")
     ref = sub.add_parser("refresh", help="fetch and cache news/weather")
@@ -201,6 +211,23 @@ def main(argv: list[str] | None = None) -> None:
         if args.play_vm is not None:
             mac_args.extend(["--play-vm", str(args.play_vm)])
         raise SystemExit(run_mac_inbox(mac_args))
+    if args.cmd == "mac-call":
+        from operator_os.mac_client import run_mac_call
+
+        mac_args = []
+        if args.pi_url is not None:
+            mac_args.extend(["--pi-url", args.pi_url])
+        if args.token is not None:
+            mac_args.extend(["--token", args.token])
+        if args.console_password is not None:
+            mac_args.extend(["--console-password", args.console_password])
+        if args.e164 is not None:
+            mac_args.extend(["--e164", args.e164])
+        if args.name is not None:
+            mac_args.extend(["--name", args.name])
+        if args.number:
+            mac_args.append(args.number)
+        raise SystemExit(run_mac_call(mac_args))
     if args.cmd == "refresh":
         from operator_os.refresh import refresh_all
 
@@ -354,6 +381,7 @@ def run_loop(
     ring_started_at: float | None = None
     sms_alert_id: int | None = None  # I/O under SMS_ALERTING
     sms_deadline: float | None = None
+    outgoing_deadline: float | None = None  # OUTGOING_RINGING pickup window
     resume_media: str | None = None  # stream URL for flash_resume
     meet_choices: list = []  # MeetDialIn list under MEET_CHOOSING
     meet_deadline: float | None = None
@@ -369,6 +397,9 @@ def run_loop(
     ) / 1000.0
     sms_double_on_ms = int(profile.raw.get("timing", {}).get("sms_double_on_ms", 400))
     sms_double_gap_ms = int(profile.raw.get("timing", {}).get("sms_double_gap_ms", 200))
+    outgoing_ring_s = float(
+        profile.raw.get("timing", {}).get("outgoing_pickup_window_ms", 30000)
+    ) / 1000.0
     vm_record_s = float(profile.raw.get("timing", {}).get("voicemail_record_ms", 30000)) / 1000.0
     mwi_stutter_s = float(profile.raw.get("timing", {}).get("mwi_stutter_ms", 2500)) / 1000.0
     inbox_hint_s = float(profile.raw.get("timing", {}).get("inbox_hint_ms", 2500)) / 1000.0
@@ -502,9 +533,11 @@ def run_loop(
             calendar_ok=calendar_configured(),
         )
         ring_thr = getattr(phone, "_ring_thread", None)
-        ringing = ctl.state in (State.INCOMING_RINGING, State.SMS_ALERTING) or (
-            ring_thr is not None and ring_thr.is_alive()
-        )
+        ringing = ctl.state in (
+            State.INCOMING_RINGING,
+            State.SMS_ALERTING,
+            State.OUTGOING_RINGING,
+        ) or (ring_thr is not None and ring_thr.is_alive())
         console_hub.set_outside_buffer(outside_digits)
         console_hub.publish(
             {
@@ -527,7 +560,8 @@ def run_loop(
     def apply(tr) -> None:
         nonlocal expect_service_done, op_session, sip_session, sip_dest, sip_dtmf, inbound
         nonlocal outside_digits, outside_last_at, ring_started_at, vm_until
-        nonlocal sms_alert_id, sms_deadline, resume_media, meet_choices, meet_deadline
+        nonlocal sms_alert_id, sms_deadline, outgoing_deadline, resume_media
+        nonlocal meet_choices, meet_deadline
         nonlocal service_digit
         if tr.reason:
             console_hub.note_transition(reason=tr.reason)
@@ -591,6 +625,24 @@ def run_loop(
                     _status(f"sms: ring failed {e}")
                     sms_alert_id = None
                     sms_deadline = None
+                    apply(ctl.handle(Event("pickup_timeout")))
+                continue
+            if action == "ring_out":
+                outgoing_deadline = time.monotonic() + outgoing_ring_s
+                events.emit("console", value="call_ring", detail=(sip_dest or "")[:20])
+                _status(
+                    f"console: outgoing ring {(sip_dest or '')[:20]} "
+                    f"(pickup {outgoing_ring_s:.0f}s)"
+                )
+                try:
+                    if phone.is_off_hook():
+                        raise RuntimeError("off-hook")
+                    phone.ring_start()
+                except Exception as e:
+                    _status(f"console: outgoing ring failed {e}")
+                    sip_dest = None
+                    sip_dtmf = ""
+                    outgoing_deadline = None
                     apply(ctl.handle(Event("pickup_timeout")))
                 continue
             if action == "announce_sms":
@@ -658,10 +710,26 @@ def run_loop(
         _apply_plant_patch()
         if tr.reason:
             _status(f"state={ctl.state.value}  ({tr.reason})")
+        if ctl.history:
+            prev_st, dest_st, _ = ctl.history[-1]
+            if (
+                prev_st == State.OUTGOING_RINGING
+                and dest_st == State.INCOMING_RINGING
+            ):
+                events.emit("console", value="call_preempted", detail="incoming")
+                _status("console: outgoing call preempted by inbound")
+                sip_dest = None
+                sip_dtmf = ""
+                outgoing_deadline = None
         if ctl.state == State.ON_HOOK_IDLE:
             if tr.reason == "sms_missed" and sms_alert_id is not None:
                 events.emit("sms", value="missed", digit=sms_alert_id)
                 _status(f"sms: no answer; queued id={sms_alert_id}")
+            if tr.reason == "outgoing_missed":
+                events.emit("console", value="call_missed", detail=(sip_dest or "")[:20])
+                _status(f"console: outgoing call missed {(sip_dest or '')[:20]}")
+                sip_dest = None
+                sip_dtmf = ""
             expect_service_done = False
             outside_digits = ""
             outside_last_at = None
@@ -669,6 +737,7 @@ def run_loop(
             vm_until = None
             sms_alert_id = None
             sms_deadline = None
+            outgoing_deadline = None
             resume_media = None
             meet_choices = []
             meet_deadline = None
@@ -1089,42 +1158,60 @@ def run_loop(
 
             place = console_hub.take_place_call()
             if place:
-                if not phone.is_off_hook():
-                    _status(f"console: place_call ignored (on hook) {place}")
-                elif ctl.state not in (
-                    State.DIAL_TONE,
-                    State.COLLECTING_DIGIT,
-                    State.PLAYING_SERVICE,
-                    State.OUTSIDE_LINE,
-                    State.MEET_CHOOSING,
-                ):
-                    _status(f"console: place_call ignored (state={ctl.state.value})")
-                else:
-                    if op_session is not None:
-                        try:
-                            op_session.cancel_now()
-                        except Exception:
-                            pass
-                        op_session = None
-                    expect_service_done = False
-                    resume_media = None
-                    sip_dest = place
-                    sip_dtmf = ""
-                    events.emit("console", value="place_call", detail=place[:20])
-                    _status(f"console: place_call {place}")
-                    if ctl.state == State.MEET_CHOOSING:
-                        meet_choices = []
-                        meet_deadline = None
-                        apply(ctl.handle(Event("meet_cancel")))
-                    if ctl.state == State.PLAYING_SERVICE:
-                        apply(ctl.handle(Event("place_call")))
+                if phone.is_off_hook():
+                    if ctl.state not in (
+                        State.DIAL_TONE,
+                        State.COLLECTING_DIGIT,
+                        State.PLAYING_SERVICE,
+                        State.OUTSIDE_LINE,
+                        State.MEET_CHOOSING,
+                    ):
+                        _status(f"console: place_call ignored (state={ctl.state.value})")
                     else:
-                        if ctl.state != State.OUTSIDE_LINE:
-                            apply(ctl.handle(Event("digit", value=9)))
-                        if ctl.state == State.OUTSIDE_LINE:
+                        if op_session is not None:
+                            try:
+                                op_session.cancel_now()
+                            except Exception:
+                                pass
+                            op_session = None
+                        expect_service_done = False
+                        resume_media = None
+                        sip_dest = place
+                        sip_dtmf = ""
+                        events.emit("console", value="place_call", detail=place[:20])
+                        _status(f"console: place_call {place}")
+                        if ctl.state == State.MEET_CHOOSING:
+                            meet_choices = []
+                            meet_deadline = None
+                            apply(ctl.handle(Event("meet_cancel")))
+                        if ctl.state == State.PLAYING_SERVICE:
                             apply(ctl.handle(Event("place_call")))
-                    if sip_session is None and live_audio:
-                        apply(ctl.handle(Event("sip_done")))
+                        else:
+                            if ctl.state != State.OUTSIDE_LINE:
+                                apply(ctl.handle(Event("digit", value=9)))
+                            if ctl.state == State.OUTSIDE_LINE:
+                                apply(ctl.handle(Event("place_call")))
+                        if sip_session is None and live_audio:
+                            apply(ctl.handle(Event("sip_done")))
+                elif ctl.state == State.ON_HOOK_IDLE:
+                    from operator_os.sip import sip_configured
+
+                    if not sip_configured():
+                        _status(f"console: place_call rejected (sip not configured) {place}")
+                    else:
+                        sip_dest = place
+                        sip_dtmf = ""
+                        events.emit("console", value="call_request", detail=place[:20])
+                        _status(f"console: call_request {place}")
+                        apply(ctl.handle(Event("call_request")))
+                        if ctl.state != State.OUTGOING_RINGING:
+                            sip_dest = None
+                            sip_dtmf = ""
+                            outgoing_deadline = None
+                else:
+                    _status(
+                        f"console: place_call rejected (busy state={ctl.state.value}) {place}"
+                    )
 
             _publish_console()
 
@@ -1174,7 +1261,12 @@ def run_loop(
                             apply(ctl.handle(Event("sip_done")))
             for kind in hook_clf.poll(on_hook=not phone.is_off_hook()):
                 _apply_hook_event(kind)
-            if ctl.state in (State.ON_HOOK_IDLE, State.HOOK_PENDING, State.SMS_ALERTING):
+            if ctl.state in (
+                State.ON_HOOK_IDLE,
+                State.HOOK_PENDING,
+                State.SMS_ALERTING,
+                State.OUTGOING_RINGING,
+            ):
                 decoder.reset()
 
             # SMS pickup window → chart event.
@@ -1185,8 +1277,20 @@ def run_loop(
             ):
                 apply(ctl.handle(Event("pickup_timeout")))
 
+            # Outgoing call.request pickup window.
+            if (
+                ctl.state == State.OUTGOING_RINGING
+                and outgoing_deadline is not None
+                and time.monotonic() >= outgoing_deadline
+            ):
+                apply(ctl.handle(Event("pickup_timeout")))
+
             # Inbound INVITE while on-hook → mechanical ring.
-            if ctl.state in (State.ON_HOOK_IDLE, State.SMS_ALERTING) and live_audio:
+            if ctl.state in (
+                State.ON_HOOK_IDLE,
+                State.SMS_ALERTING,
+                State.OUTGOING_RINGING,
+            ) and live_audio:
                 if inbound is not None and inbound.is_alive():
                     ev = inbound.poll()
                     if ev == "incoming":
@@ -1202,6 +1306,10 @@ def run_loop(
                 continue
 
             if ctl.state == State.SMS_ALERTING:
+                time.sleep(0.02)
+                continue
+
+            if ctl.state == State.OUTGOING_RINGING:
                 time.sleep(0.02)
                 continue
 

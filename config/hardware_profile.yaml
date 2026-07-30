@@ -158,6 +158,8 @@ timing:
   sms_pickup_window_ms: 30000
   sms_double_on_ms: 400
   sms_double_gap_ms: 200
+  # Mac/console call.request: continuous ring until pickup or this window.
+  outgoing_pickup_window_ms: 30000
 safety:
   ring_gpio_fails_off: true
   ring_while_off_hook_allowed: false

@@ -58,6 +58,7 @@ STATE_PATCH: dict[State, Patch] = {
     State.ON_HOOK_IDLE: Patch(label="idle"),
     State.INCOMING_RINGING: Patch(label="ringing"),
     State.SMS_ALERTING: Patch(label="sms_alert"),
+    State.OUTGOING_RINGING: Patch(label="outgoing_alert"),
     State.DIAL_TONE: Patch(receiver=ReceiverFeed.DIAL_TONE, label="dial_tone"),
     State.COLLECTING_DIGIT: Patch(label="collect"),
     State.PLAYING_SERVICE: Patch(receiver=ReceiverFeed.SERVICE, label="service"),
@@ -140,7 +141,13 @@ class Plant:
                 self.audio.notify_hangup()
                 return
 
-            if patch.label in ("hook_pending", "voicemail", "ringing", "sms_alert"):
+            if patch.label in (
+                "hook_pending",
+                "voicemail",
+                "ringing",
+                "sms_alert",
+                "outgoing_alert",
+            ):
                 self._drop_line_legs()
                 self.audio.stop()
                 return

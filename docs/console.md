@@ -44,9 +44,10 @@ console stays off.
 - Lists recent SMS + voicemail from SQLite; names from the directory when known.
 - Play VM WAV in-browser; mark heard; delete.
 - **Reply:** draft in prompt → confirm → `send_sms` (same path as tools).
-- **Call:** queues `place_call` through the chart (handset must be off-hook).
-- Desktop companions may call the same `/api/inbox*` routes with
-  `OPERATOR_DESKTOP_TOKEN` (see [desktop-bridge.md](desktop-bridge.md)).
+- **Call:** on-hook → rings WE302 then SIP after pickup; off-hook → places through
+  the chart immediately (same `/api/place-call` queue).
+- Desktop companions may call the same `/api/inbox*` and `/api/place-call` routes
+  with `OPERATOR_DESKTOP_TOKEN` (see [desktop-bridge.md](desktop-bridge.md)).
 
 ### Directory (phonebook)
 

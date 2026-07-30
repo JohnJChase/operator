@@ -29,6 +29,7 @@ class State(str, Enum):
     VOICEMAIL = "VOICEMAIL"  # on-hook miss: SIP answered; handset mic must stay dead
     HOOK_PENDING = "HOOK_PENDING"  # cradle down; silence; flash vs hangup
     SMS_ALERTING = "SMS_ALERTING"  # double-ring + pickup window
+    OUTGOING_RINGING = "OUTGOING_RINGING"  # Mac/console call.request; pickup → SIP
     MEET_CHOOSING = "MEET_CHOOSING"  # digit-7 menu; rotary 1–N selects a Meet
     DIAGNOSTIC = "DIAGNOSTIC"
     ERROR = "ERROR"
@@ -77,12 +78,30 @@ CHART_EDGES: tuple[ChartEdge, ...] = (
     ChartEdge(State.ON_HOOK_IDLE, "off_hook", State.DIAL_TONE, ("dial_tone",)),
     ChartEdge(State.ON_HOOK_IDLE, "ring_start", State.INCOMING_RINGING, ("ring_start",)),
     ChartEdge(State.ON_HOOK_IDLE, "sms_alert", State.SMS_ALERTING, ("ring_sms",)),
+    ChartEdge(
+        State.ON_HOOK_IDLE,
+        "call_request",
+        State.OUTGOING_RINGING,
+        ("ring_out",),
+    ),
     ChartEdge(State.SMS_ALERTING, "pickup_timeout", State.ON_HOOK_IDLE, ("ring_stop",)),
     ChartEdge(
         State.SMS_ALERTING,
         "off_hook",
         State.PLAYING_SERVICE,
         ("ring_stop", "announce_sms"),
+    ),
+    ChartEdge(
+        State.OUTGOING_RINGING,
+        "off_hook",
+        State.SIP_CALL,
+        ("ring_stop", "sip_dial"),
+    ),
+    ChartEdge(
+        State.OUTGOING_RINGING,
+        "pickup_timeout",
+        State.ON_HOOK_IDLE,
+        ("ring_stop",),
     ),
     ChartEdge(
         State.INCOMING_RINGING,
@@ -280,6 +299,10 @@ def _transition(
             return Transition(
                 State.SMS_ALERTING, actions=("ring_sms",), reason="sms_alert"
             )
+        if et == "call_request":
+            return Transition(
+                State.OUTGOING_RINGING, actions=("ring_out",), reason="call_request"
+            )
         return Transition(state)
 
     if state == State.SMS_ALERTING:
@@ -297,8 +320,34 @@ def _transition(
             )
         if et == "sms_alert":
             return Transition(state, reason="sms_busy")
+        if et == "call_request":
+            return Transition(state, reason="call_busy")
         if et == "ring_start":
             # Inbound voice wins over SMS alert ring.
+            return Transition(
+                State.INCOMING_RINGING,
+                actions=("ring_stop", "ring_start"),
+                reason="incoming",
+            )
+        return Transition(state)
+
+    if state == State.OUTGOING_RINGING:
+        if et == "off_hook":
+            return Transition(
+                State.SIP_CALL,
+                actions=("ring_stop", "sip_dial"),
+                reason="outgoing_pickup",
+            )
+        if et == "pickup_timeout":
+            return Transition(
+                State.ON_HOOK_IDLE,
+                actions=("ring_stop",),
+                reason="outgoing_missed",
+            )
+        if et == "call_request":
+            return Transition(state, reason="call_busy")
+        if et == "ring_start":
+            # Inbound voice wins over Mac/console outgoing request ring.
             return Transition(
                 State.INCOMING_RINGING,
                 actions=("ring_stop", "ring_start"),

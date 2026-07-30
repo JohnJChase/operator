@@ -188,10 +188,41 @@ def test_sms_alerting_pickup_and_miss():
     assert tr.reason == "sms_missed"
 
 
+def test_outgoing_ringing_pickup_and_miss():
+    ctl = PhoneController()
+    tr = ctl.handle(Event("call_request"))
+    assert ctl.state == State.OUTGOING_RINGING
+    assert "ring_out" in tr.actions
+    tr = ctl.handle(Event("off_hook"))
+    assert ctl.state == State.SIP_CALL
+    assert "sip_dial" in tr.actions
+    assert tr.reason == "outgoing_pickup"
+
+    ctl = PhoneController()
+    ctl.handle(Event("call_request"))
+    tr = ctl.handle(Event("pickup_timeout"))
+    assert ctl.state == State.ON_HOOK_IDLE
+    assert tr.reason == "outgoing_missed"
+
+
+def test_outgoing_ringing_busy_and_inbound_preempt():
+    ctl = PhoneController()
+    ctl.handle(Event("call_request"))
+    tr = ctl.handle(Event("call_request"))
+    assert ctl.state == State.OUTGOING_RINGING
+    assert tr.reason == "call_busy"
+
+    tr = ctl.handle(Event("ring_start"))
+    assert ctl.state == State.INCOMING_RINGING
+    assert "ring_start" in tr.actions
+
+
 def test_chart_edges_cover_hook_pending_and_sms():
     from operator_os.state import CHART_EDGES, State
 
     labels = {(e.source, e.event, e.dest) for e in CHART_EDGES}
     assert (State.DIAL_TONE, "cradle_down", State.HOOK_PENDING) in labels
     assert (State.ON_HOOK_IDLE, "sms_alert", State.SMS_ALERTING) in labels
+    assert (State.ON_HOOK_IDLE, "call_request", State.OUTGOING_RINGING) in labels
+    assert (State.OUTGOING_RINGING, "off_hook", State.SIP_CALL) in labels
     assert (State.HOOK_PENDING, "hangup", State.ON_HOOK_IDLE) in labels

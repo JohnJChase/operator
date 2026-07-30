@@ -146,6 +146,9 @@ mac-status *args:
 mac-inbox *args:
     uv run operator-os mac-inbox {{args}}
 
+mac-call *args:
+    uv run operator-os mac-call {{args}}
+
 lint:
     uv run ruff check .
 

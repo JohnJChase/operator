@@ -157,6 +157,20 @@ just mac-inbox --play-vm 3
 `mac-inbox` uses `/api/inbox` with the desktop token (or console session).
 Resolve voicemail audio as `{OPERATOR_PI_URL}{audio_url}`.
 
+### Outgoing call (Phase 5)
+
+With the WE302 on-hook:
+
+```bash
+just mac-call +12025551212
+# or: just mac-call --name Alice
+```
+
+The Pi rings the 302 (`OUTGOING_RINGING`). Pick up to place the SIP call; hang up
+to end it. No pickup within `outgoing_pickup_window_ms` cancels. If the phone is
+busy, the request is rejected (check Pi logs). Off-hook console Call still dials
+immediately without ringing.
+
 If the WE302 double-rings but the Mac client logs no `notified:` line, check the
 Pi log. New SMS delivery attempts log either:
 
@@ -227,6 +241,4 @@ Resolve audio as `{OPERATOR_PI_URL}{audio_url}`. Do not Funnel these routes.
 
 Good next increments:
 
-- Phase 5: Mac "call this contact" request that rings the WE302 first, then
-  places the call after pickup.
 - Phase 6: tiny SwiftUI menu bar wrapper around the same exchange protocol.

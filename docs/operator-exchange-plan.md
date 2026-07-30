@@ -410,10 +410,16 @@ Acceptance:
   URL if local playback is not worth the code yet
 - no new native dependencies are required
 
-### Phase 5: Chart-First Outgoing Call Request Flow
+### Phase 5: Chart-First Outgoing Call Request Flow (Complete)
 
 Goal: make the Mac a station that can ask the exchange to place a call while the
 WE302 keeps the physical ritual.
+
+Status:
+
+- complete: `OUTGOING_RINGING` chart state; `/api/place-call` + `just mac-call`
+- on-hook request rings WE302; pickup runs existing `sip_dial`; timeout cancels;
+  busy / SIP-unconfigured rejects without dialing on-hook
 
 Flow:
 
@@ -512,9 +518,8 @@ Acceptance:
 
 ## Immediate Next Build
 
-Phases 1–2 (Pi) and 4 (Mac CLI) are merged. Next useful Pi coding increment is
-Phase 5 (chart-first outgoing `call.request`). Phase 3 request vocabulary stays
-optional while inbox POSTs cover reply/heard/delete.
+Phases 1–2 / 4–5 are live. Phase 3 request vocabulary stays optional. Next large
+piece is Phase 6 (native Mac app) when the CLI proves too thin.
 
 ## Non-Goals For Now
 

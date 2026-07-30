@@ -143,6 +143,43 @@ def run_mac_inbox(argv: list[str] | None = None) -> int:
     return 0
 
 
+def run_mac_call(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="operator-os mac-call",
+        description="Ask the Pi to ring the WE302, then place an outbound SIP call.",
+    )
+    _add_console_args(parser)
+    parser.add_argument("number", nargs="?", default="", help="E.164 or NANP number")
+    parser.add_argument("--e164", default="", help="E.164 or NANP number")
+    parser.add_argument("--name", default="", help="phonebook contact name")
+    args = parser.parse_args(argv)
+
+    try:
+        opener = _mac_api_opener(args)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    base = args.pi_url.rstrip("/")
+    payload: dict[str, Any] = {}
+    e164 = str(args.e164 or args.number or "").strip()
+    name = str(args.name or "").strip()
+    if e164:
+        payload["e164"] = e164
+    elif name:
+        payload["name"] = name
+    else:
+        print("mac-call: pass a number or --name", file=sys.stderr)
+        return 2
+    try:
+        out = _post_json_opener(opener, base, "/api/place-call", payload)
+    except Exception as e:
+        print(f"mac-call: {e}", file=sys.stderr)
+        return 1
+    dest = out.get("e164") or e164 or name
+    print(f"mac-call: requested {dest} — pick up the WE302 when it rings")
+    return 0
+
+
 def _add_console_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--pi-url",
@@ -228,6 +265,28 @@ def _get_bytes(opener: urllib.request.OpenerDirector, url: str) -> bytes:
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")[:240]
         raise RuntimeError(f"HTTP {e.code}: {detail}") from e
+
+
+def _post_json_opener(
+    opener: urllib.request.OpenerDirector,
+    base: str,
+    path: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        base + path,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with opener.open(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:240]
+        raise RuntimeError(f"HTTP {e.code}: {detail}") from e
+    return data if isinstance(data, dict) else {}
 
 
 def _format_status(status: dict[str, Any]) -> str:

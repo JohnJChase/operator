@@ -342,17 +342,9 @@ class ConsoleHttpServer:
                         return
                     self._handle_inbox_post(path)
                     return
-                if not self._require_auth():
-                    return
-                if path == "/api/ring-test":
-                    if hub.request_ring_test():
-                        from operator_os.console_hub import RING_TEST_MS
-
-                        self._ok_json({"ok": True, "ms": RING_TEST_MS})
-                    else:
-                        self._err(409, "ring test already pending")
-                    return
                 if path == "/api/place-call":
+                    if not self._require_inbox_auth():
+                        return
                     data = self._read_json()
                     e164 = str(data.get("e164") or "").strip()
                     if not e164:
@@ -368,10 +360,23 @@ class ConsoleHttpServer:
                     from operator_os.sip import normalize_nanp
 
                     dest = normalize_nanp(e164) or e164
+                    if not dest:
+                        self._err(400, "invalid number")
+                        return
                     if not hub.request_place_call(dest):
                         self._err(409, "place call already pending")
                         return
                     self._ok_json({"ok": True, "e164": dest})
+                    return
+                if not self._require_auth():
+                    return
+                if path == "/api/ring-test":
+                    if hub.request_ring_test():
+                        from operator_os.console_hub import RING_TEST_MS
+
+                        self._ok_json({"ok": True, "ms": RING_TEST_MS})
+                    else:
+                        self._err(409, "ring test already pending")
                     return
                 if path == "/api/desktop/open-url":
                     data = self._read_json()

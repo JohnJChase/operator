@@ -151,13 +151,13 @@ def test_run_mac_inbox_fetches_console_inbox(
 
     monkeypatch.setenv("OPERATOR_CONSOLE_PASSWORD", "pw")
     monkeypatch.delenv("OPERATOR_DESKTOP_TOKEN", raising=False)
-    store.configure(tmp_path / "operator.sqlite3")
+    store.configure(tmp_path / "operator-console.sqlite3")
     store.init_db()
     store.upsert_inbound(
-        telnyx_id="sms-1",
+        telnyx_id="sms-2",
         from_e164="+15551234567",
         to_e164="+12025550100",
-        body="real inbox smoke",
+        body="console password path",
     )
     srv = ConsoleHttpServer(ConsoleHub(), host="127.0.0.1", port=0)
     srv.start()
@@ -170,4 +170,36 @@ def test_run_mac_inbox_fetches_console_inbox(
         srv.stop()
         store.configure()
 
-    assert "real inbox smoke" in capsys.readouterr().out
+    assert "console password path" in capsys.readouterr().out
+
+
+def test_run_mac_call_requires_auth(monkeypatch, capsys):
+    monkeypatch.delenv("OPERATOR_CONSOLE_PASSWORD", raising=False)
+    monkeypatch.delenv("OPERATOR_DESKTOP_TOKEN", raising=False)
+
+    from operator_os.mac_client import run_mac_call
+
+    assert run_mac_call(["+15551234567"]) == 2
+    assert "OPERATOR_DESKTOP_TOKEN or OPERATOR_CONSOLE_PASSWORD is required" in (
+        capsys.readouterr().err
+    )
+
+
+def test_run_mac_call_posts_place_call(tmp_path: Path, monkeypatch, capsys):
+    from operator_os.console_hub import ConsoleHub
+    from operator_os.console_http import ConsoleHttpServer
+    from operator_os.mac_client import run_mac_call
+
+    monkeypatch.setenv("OPERATOR_DESKTOP_TOKEN", "desk-token")
+    monkeypatch.delenv("OPERATOR_CONSOLE_PASSWORD", raising=False)
+    hub = ConsoleHub()
+    srv = ConsoleHttpServer(hub, host="127.0.0.1", port=0)
+    srv.start()
+    assert srv._httpd is not None
+    port = srv._httpd.server_address[1]
+    try:
+        assert run_mac_call(["--pi-url", f"http://127.0.0.1:{port}", "+15551234567"]) == 0
+    finally:
+        srv.stop()
+    assert hub.take_place_call() == "+15551234567"
+    assert "requested +15551234567" in capsys.readouterr().out

@@ -16,8 +16,11 @@ stateDiagram-v2
   ON_HOOK_IDLE --> DIAL_TONE: off_hook
   ON_HOOK_IDLE --> INCOMING_RINGING: ring_start
   ON_HOOK_IDLE --> SMS_ALERTING: sms_alert
+  ON_HOOK_IDLE --> OUTGOING_RINGING: call_request
   SMS_ALERTING --> ON_HOOK_IDLE: pickup_timeout
   SMS_ALERTING --> PLAYING_SERVICE: off_hook
+  OUTGOING_RINGING --> SIP_CALL: off_hook
+  OUTGOING_RINGING --> ON_HOOK_IDLE: pickup_timeout
   INCOMING_RINGING --> SIP_CALL: off_hook
   INCOMING_RINGING --> VOICEMAIL: voicemail_answer
   INCOMING_RINGING --> ON_HOOK_IDLE: incoming_cancel
