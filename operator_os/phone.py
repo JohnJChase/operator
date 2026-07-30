@@ -95,6 +95,13 @@ class HookFlashClassifier:
             return ["on_hook"]
         return []
 
+    def pending_down_s(self, *, now: float | None = None) -> float | None:
+        """Seconds cradle has been down since cradle_down, or None if not pending."""
+        if self._pending_onhook_at is None:
+            return None
+        t = time.monotonic() if now is None else now
+        return max(0.0, t - self._pending_onhook_at)
+
 
 class PhoneIO:
     """Common phone I/O surface used by the state loop."""

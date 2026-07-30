@@ -203,7 +203,7 @@ CHART_EDGES: tuple[ChartEdge, ...] = (
     ChartEdge(State.HOOK_PENDING, "flash_resume", State.DIAL_TONE, ("dial_tone",)),
     ChartEdge(State.HOOK_PENDING, "flash_resume", State.PLAYING_SERVICE, ("resume_service",)),
     ChartEdge(State.HOOK_PENDING, "flash_resume", State.OUTSIDE_LINE),
-    ChartEdge(State.HOOK_PENDING, "flash_resume", State.SIP_CALL),
+    # SIP_CALL is not resumed by flash: trunk BYE fires once past bounce window.
     ChartEdge(State.HOOK_PENDING, "flash_resume", State.COLLECTING_DIGIT),
     ChartEdge(State.HOOK_PENDING, "flash_resume", State.MEET_CHOOSING),
 )
@@ -271,6 +271,11 @@ def _transition(
     if state == State.HOOK_PENDING:
         if et in ("hook_flash", "hook_flash_2", "cradle_bounce"):
             dest = resume if resume in _OFF_HOOK_RESUME else State.DIAL_TONE
+            # Flash is past the bounce window; the SIP trunk is already cleared
+            # so resume the call plant would be a dead air path — dial tone instead.
+            # Cradle bounce (< flash_min) can still restore SIP_CALL while up.
+            if et != "cradle_bounce" and dest == State.SIP_CALL:
+                dest = State.DIAL_TONE
             reason = "cradle_bounce" if et == "cradle_bounce" else "flash_resume"
             return Transition(dest, actions=_resume_actions(dest), reason=reason)
         return Transition(state)
@@ -536,6 +541,7 @@ def render_mermaid() -> str:
         lines.append(f"  {edge.source.value} --> {edge.dest.value}: {edge.event}")
     lines.append("  note right of HOOK_PENDING")
     lines.append("    cradle_down cuts audio;")
+    lines.append("    SIP BYE after bounce window;")
     lines.append("    flash resumes resume_state;")
     lines.append("    hangup → idle")
     lines.append("  end note")
@@ -557,7 +563,8 @@ def write_state_chart(path: str = "docs/state-chart.md") -> str:
         "- New capabilities = chart states/edges + patch rows — not ALSA hacks "
         "in feature code.\n"
         "- Cradle down enters `HOOK_PENDING` (silence first); flash vs hangup "
-        "is decided after the cut.\n"
+        "is decided after the cut. Active SIP sends BYE once past the bounce "
+        "window so the far end drops immediately.\n"
         "- If a bug story is a race, queue order, or “forgot to stop audio,” "
         "the chart or patch table is wrong.\n\n"
         f"{render_mermaid()}"

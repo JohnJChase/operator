@@ -357,6 +357,7 @@ class _PjsuaProc:
         os.write(master, data)
 
     def hangup(self) -> None:
+        """Send BYE/quit immediately; reap the process off the phone loop."""
         with self._lock:
             proc = self._proc
             master = self._master
@@ -365,43 +366,48 @@ class _PjsuaProc:
             home = self._home
             log_path = self._log_path
             log_fp = self._log_fp
+            reader = self._reader
             self._home = None
             self._log_path = None
             self._log_fp = None
+            self._reader = None
         if master is not None:
             try:
                 os.write(master, b"h\rq\r")
             except OSError:
                 pass
-        if proc is not None:
-            try:
-                proc.wait(timeout=1.5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+
+        def _reap() -> None:
+            if proc is not None:
                 try:
-                    proc.wait(timeout=0.5)
+                    proc.wait(timeout=1.5)
                 except subprocess.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        pass
+            if master is not None:
+                try:
+                    os.close(master)
+                except OSError:
                     pass
-        if master is not None:
-            try:
-                os.close(master)
-            except OSError:
-                pass
-        if self._reader is not None:
-            self._reader.join(timeout=1.0)
-            self._reader = None
-        if log_fp is not None:
-            try:
-                log_fp.close()
-            except Exception:
-                pass
-        if log_path is not None and log_path.is_file():
-            try:
-                shutil.copyfile(log_path, LAST_LOG)
-            except OSError:
-                pass
-        if home is not None:
-            shutil.rmtree(home, ignore_errors=True)
+            if reader is not None:
+                reader.join(timeout=1.0)
+            if log_fp is not None:
+                try:
+                    log_fp.close()
+                except Exception:
+                    pass
+            if log_path is not None and log_path.is_file():
+                try:
+                    shutil.copyfile(log_path, LAST_LOG)
+                except OSError:
+                    pass
+            if home is not None:
+                shutil.rmtree(home, ignore_errors=True)
+
+        threading.Thread(target=_reap, daemon=True, name="pjsua-reap").start()
 
     def wait_log(self, needle: str, timeout_s: float) -> bool:
         deadline = time.monotonic() + timeout_s

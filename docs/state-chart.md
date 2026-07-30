@@ -7,7 +7,7 @@ Rules:
 
 - Named states own the plant. Each state has a cordboard patch (`operator_os.plant.STATE_PATCH`); see `docs/audio-line.md`.
 - New capabilities = chart states/edges + patch rows — not ALSA hacks in feature code.
-- Cradle down enters `HOOK_PENDING` (silence first); flash vs hangup is decided after the cut.
+- Cradle down enters `HOOK_PENDING` (silence first); flash vs hangup is decided after the cut. Active SIP sends BYE once past the bounce window so the far end drops immediately.
 - If a bug story is a race, queue order, or “forgot to stop audio,” the chart or patch table is wrong.
 
 ```mermaid
@@ -50,11 +50,11 @@ stateDiagram-v2
   HOOK_PENDING --> DIAL_TONE: flash_resume
   HOOK_PENDING --> PLAYING_SERVICE: flash_resume
   HOOK_PENDING --> OUTSIDE_LINE: flash_resume
-  HOOK_PENDING --> SIP_CALL: flash_resume
   HOOK_PENDING --> COLLECTING_DIGIT: flash_resume
   HOOK_PENDING --> MEET_CHOOSING: flash_resume
   note right of HOOK_PENDING
     cradle_down cuts audio;
+    SIP BYE after bounce window;
     flash resumes resume_state;
     hangup → idle
   end note

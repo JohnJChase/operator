@@ -1298,6 +1298,17 @@ def run_loop(
                     _ensure_inbound()
 
             if ctl.state == State.HOOK_PENDING:
+                # Chart still waits hangup_min for flash vs hangup, but once past
+                # the bounce window the far end must hear BYE immediately.
+                down_s = hook_clf.pending_down_s()
+                if (
+                    sip_session is not None
+                    and down_s is not None
+                    and down_s >= hook_clf.flash_min_s
+                ):
+                    _hangup_sip()
+                    events.emit("sip", value="hangup", detail="hook_early")
+                    _status("sip: hangup (cradle)")
                 time.sleep(0.02)
                 continue
 

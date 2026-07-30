@@ -1,5 +1,7 @@
 """Hook flash vs hangup classification + HOOK_PENDING chart."""
 
+import pytest
+
 from operator_os.phone import HookFlashClassifier
 from operator_os.state import Event, PhoneController, State
 
@@ -36,6 +38,38 @@ def test_bounce_below_flash_min_is_cradle_bounce():
     c = _clf()
     c.feed(False, now=0.0)
     assert c.feed(True, now=0.05) == ["cradle_bounce"]
+
+
+def test_pending_down_s_tracks_cradle():
+    c = _clf()
+    assert c.pending_down_s(now=1.0) is None
+    c.feed(False, now=1.0)
+    assert c.pending_down_s(now=1.05) == pytest.approx(0.05)
+    c.feed(True, now=1.2)
+    assert c.pending_down_s(now=1.3) is None
+
+
+def test_hook_pending_flash_from_sip_goes_to_dial_tone():
+    """Flash after SIP cradle-down cannot restore the trunk (BYE already sent)."""
+    ctl = PhoneController()
+    ctl.handle(Event("off_hook"))
+    ctl.state = State.SIP_CALL
+    ctl.handle(Event("cradle_down"))
+    assert ctl.state == State.HOOK_PENDING
+    assert ctl.resume_state == State.SIP_CALL
+    tr = ctl.handle(Event("hook_flash"))
+    assert tr.state == State.DIAL_TONE
+    assert tr.reason == "flash_resume"
+
+
+def test_hook_pending_bounce_from_sip_can_resume_call():
+    ctl = PhoneController()
+    ctl.handle(Event("off_hook"))
+    ctl.state = State.SIP_CALL
+    ctl.handle(Event("cradle_down"))
+    tr = ctl.handle(Event("cradle_bounce"))
+    assert tr.state == State.SIP_CALL
+    assert tr.reason == "cradle_bounce"
 
 
 def test_hook_pending_flash_resumes_playing_service():
